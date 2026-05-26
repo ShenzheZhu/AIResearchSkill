@@ -25,6 +25,9 @@ It is designed to work across agents:
 - `multi-pr-feature-shipping/`
   Discipline and workflow for shipping a multi-issue feature as a series of small sub-PRs into a long-lived integration branch. Covers branch strategy (per-issue worktrees off `feat/<feature>`), the six-step cycle (setup → implement → self-check → commit → push → PR), always-ask gates, eight discipline rules (honest reporting, strict scope, no fabrication, anti-self-inflation, …), common failure modes with cause/prevention pairs, and a boundary-log debugging methodology.
 
+- `prolific-human-validation/`
+  Design and run Prolific human-validation studies for AI research claims and rebuttals, especially AI Task Builder Batch workflows for scenario realism, failure-label validity, multi-user specificity, and failure-severity validation. Includes scripts for creating draft studies, pulling ATB reports, and summarizing results into rebuttal-ready tables.
+
 ## Usage
 
 For Codex:

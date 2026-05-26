@@ -1,0 +1,4 @@
+interface:
+  display_name: "Prolific Human Validation"
+  short_description: "Run Prolific studies for research validation."
+  default_prompt: "Use this skill to design a Prolific human-validation study, create an AI Task Builder draft, pull results, and summarize evidence for a paper or rebuttal."
