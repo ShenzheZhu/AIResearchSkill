@@ -1,0 +1,4 @@
+interface:
+  display_name: "Software Development Discipline"
+  short_description: "General workflow discipline for scoped, traceable, verified software development."
+  default_prompt: "Use this skill when starting or continuing non-trivial software work involving issues, branches, PRs, CI, release trains, regressions, subagents, or project-wide engineering process. Follow local repo instructions first, then use this as the general contract for scope, verification, review, and merge discipline."

@@ -1,6 +1,7 @@
 # AIResearchSkill
 
-This repository stores reusable agent skills for common AI research usage.
+This repository stores reusable agent skills for common AI research and
+software-engineering workflows.
 
 It is designed to work across agents:
 
@@ -11,7 +12,7 @@ It is designed to work across agents:
 The repository root is also a router skill:
 
 - `SKILL.md`
-  An umbrella router that chooses the right focused skill for OpenReview submissions, reviewer rebuttals, human validation, LaTeX page reduction, GitHub publishing, API-first web automation, and multi-PR research engineering.
+  An umbrella router that chooses the right focused skill for OpenReview submissions, reviewer rebuttals, human validation, LaTeX page reduction, GitHub publishing, API-first web automation, and general software-development discipline.
 
 ## Structure
 
@@ -27,8 +28,8 @@ The repository root is also a router skill:
 - `latex-page-reduction/`
   Reduce a LaTeX conference paper to a hard page limit (e.g., 9 pages for COLM/ICLR/ICML). Covers priority-ordered trimming techniques (syntactic tightening → removing redundant examples → negative vspace → structural moves), hard rules (never change `[H]` float, no em dashes, no content deletion without approval), Overleaf merge-conflict handling, and common pitfalls.
 
-- `multi-pr-feature-shipping/`
-  Discipline and workflow for shipping a multi-issue feature as a series of small sub-PRs into a long-lived integration branch. Covers branch strategy (per-issue worktrees off `feat/<feature>`), the six-step cycle (setup → implement → self-check → commit → push → PR), always-ask gates, eight discipline rules (honest reporting, strict scope, no fabrication, anti-self-inflation, …), common failure modes with cause/prevention pairs, and a boundary-log debugging methodology.
+- `software-development-discipline/`
+  General software-project development contract for scoped, traceable, verified work. Covers issue quality, branch strategy, commit/push/PR/merge gates, verification ladders, regression handling, subagent delegation, multi-issue checkpoints, and debugging discipline.
 
 - `prolific-human-validation/`
   Design and run Prolific human-validation studies for AI research claims and rebuttals, especially AI Task Builder Batch workflows for scenario realism, failure-label validity, multi-user specificity, and failure-severity validation. Includes scripts for creating draft studies, pulling ATB reports, and summarizing results into rebuttal-ready tables.

@@ -1,6 +1,6 @@
 ---
 name: ai-research-skill-router
-description: Route AI research tasks to the right workflow skill. Use for OpenReview submissions, reviewer rebuttals, validation studies, LaTeX page reduction, GitHub publishing, API-first web automation, and multi-PR research engineering.
+description: Route AI research and engineering tasks to the right workflow skill. Use for OpenReview submissions, reviewer rebuttals, validation studies, LaTeX page reduction, GitHub publishing, API-first web automation, and general software-development discipline.
 ---
 
 # AI Research Skill Router
@@ -10,7 +10,7 @@ Use this as the umbrella skill for AI research operations. It routes to the focu
 ## Routing Workflow
 
 1. Classify the task.
-   Identify whether the user needs submission automation, rebuttal writing, validation experiments, Prolific studies, LaTeX page reduction, GitHub publishing, web automation, or feature-shipping workflow.
+   Identify whether the user needs submission automation, rebuttal writing, validation experiments, Prolific studies, LaTeX page reduction, GitHub publishing, web automation, or software-development workflow.
 
 2. Pick one primary skill.
    Read the selected child skill folder `SKILL.md` first. Follow its workflow as the main procedure.
@@ -35,7 +35,7 @@ Use this as the umbrella skill for AI research operations. It routes to the focu
 | LaTeX page reduction | `latex-page-reduction/SKILL.md` | Reduce a conference paper to a strict page limit without changing scientific claims. |
 | GitHub repo creation or push | `auto-github/SKILL.md` | Initialize git, create a GitHub repository, attach remotes, commit, and push safely. |
 | Website task or dashboard automation | `api-first-web-automation/SKILL.md` | Search for APIs, docs, direct URLs, and stable endpoints before browser automation. |
-| Large feature split across PRs | `multi-pr-feature-shipping/SKILL.md` | Ship a multi-issue feature as small reviewable PRs into a long-lived integration branch. |
+| Software development process | `software-development-discipline/SKILL.md` | Keep non-trivial software work scoped, traceable, verified, and reviewable across issues, PRs, CI, release trains, regressions, and subagents. |
 
 ## Common Combinations
 
@@ -61,4 +61,4 @@ Use this as the umbrella skill for AI research operations. It routes to the focu
 - `latex-page-reduction/`: LaTeX page-limit reduction rules.
 - `auto-github/`: GitHub repo creation and publishing workflow.
 - `api-first-web-automation/`: API-first approach before browser automation.
-- `multi-pr-feature-shipping/`: disciplined multi-PR feature workflow.
+- `software-development-discipline/`: general software-development workflow discipline.

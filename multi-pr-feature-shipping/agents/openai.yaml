@@ -1,4 +1,0 @@
-interface:
-  display_name: "Multi-PR Feature Shipper"
-  short_description: "Discipline + workflow for shipping a multi-issue feature as small PRs into a long-lived integration branch."
-  default_prompt: "Use this skill when starting a feature that spans 3+ issues, when you need main to stay stable while iterating, or when establishing collaboration norms with a human reviewer. Covers branch strategy, the per-issue six-step cycle, always-ask gates, eight discipline rules, common failure modes, and a debugging methodology."
