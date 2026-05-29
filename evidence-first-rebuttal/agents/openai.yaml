@@ -1,4 +1,4 @@
 interface:
   display_name: "Evidence-First Rebuttal"
   short_description: "Draft, validate, and polish reviewer rebuttals with evidence-grounded claims."
-  default_prompt: "Use this skill to turn reviewer weaknesses and questions into a structured rebuttal, decide and run only necessary rebuttal experiments, audit evidence coverage, and polish the final Markdown with agent-style."
+  default_prompt: "Use this skill to turn reviewer weaknesses and questions into a complete OpenReview-style rebuttal format, decide and run only necessary rebuttal experiments, audit evidence coverage, and polish the final Markdown with agent-style."

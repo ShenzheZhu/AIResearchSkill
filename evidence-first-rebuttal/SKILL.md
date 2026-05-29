@@ -29,6 +29,7 @@ Use this skill when reviewers raise methodological, empirical, presentation, or 
 5. Audit before polishing.
    Check every reviewer issue is covered, no unrun experiment is implied, existing paper tables are referenced rather than duplicated, and final-revision quotes are concrete.
 
+For the complete reviewer-facing Markdown format, read `references/rebuttal-format.md`.
 For a detailed writing and audit checklist, read `references/rebuttal-checklist.md`.
 For rebuttal experiments, ablations, human validations, or remote training, read `references/experiment-workflow.md`.
 For final prose review with `agent-style`, read `references/agent-style-polish.md`.
@@ -142,5 +143,6 @@ Before giving the user a final rebuttal draft:
 ## Resources
 
 - `references/rebuttal-checklist.md`: issue map, evidence ledger, experiment triage, and final audit checklist.
+- `references/rebuttal-format.md`: complete working-draft and final OpenReview Markdown structure.
 - `references/experiment-workflow.md`: how to decide, preflight, run, monitor, and report rebuttal experiments.
 - `references/agent-style-polish.md`: how to run `agent-style` audit, compare, and polish safely for rebuttal prose.
