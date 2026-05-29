@@ -2,14 +2,18 @@
 
 Use this repository as a cross-agent toolkit.
 
-## How to use a skill folder
+## How to Use a Skill Folder
 
-1. Read the target folder's `SKILL.md`.
-2. Use the workflow in that file as the primary procedure.
-3. Run scripts from `scripts/` instead of rewriting one-off commands when possible.
-4. Read `references/` only when the task needs more detail.
+1. If the task spans multiple research operations, read the root `SKILL.md` router first.
+2. Read the selected target folder `SKILL.md`.
+3. Use the workflow in that file as the primary procedure.
+4. Run scripts from `scripts/` instead of rewriting one-off commands when possible.
+5. Read `references/` only when the task needs more detail.
 
-## Skill map
+## Skill Map
+
+- Root `SKILL.md`
+  Use as the AI research skill router. It chooses the focused child skill for OpenReview, rebuttals, validation, LaTeX page reduction, GitHub publishing, web automation, or multi-PR engineering.
 
 - `openreview-submit/`
   Use for OpenReview inspection, author-list updates, profile-id lookup, and batch submission edits.
@@ -26,7 +30,7 @@ Use this repository as a cross-agent toolkit.
 - `evidence-first-rebuttal/`
   Use for OpenReview-style rebuttal drafting, experiment planning/runs, and final polish. Covers full final-response Markdown format, reviewer-by-reviewer issue mapping, evidence ledgers, paper-aligned preflight/smoke/full-run discipline, Markdown tables, page-limit constraints, agent-style review, and direct non-sycophantic wording.
 
-## Operating rule
+## Operating Rule
 
 Prefer the stable interface in this order:
 

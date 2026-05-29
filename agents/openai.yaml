@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Research Skill Router"
+  short_description: "Route AI research tasks to the right workflow skill."
+  default_prompt: "Use this umbrella skill to choose the right AIResearchSkill workflow for OpenReview submissions, rebuttals, validation studies, LaTeX page reduction, GitHub publishing, web automation, or multi-PR research engineering."

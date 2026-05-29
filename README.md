@@ -8,6 +8,11 @@ It is designed to work across agents:
 - Claude Code and other coding agents can read the same folders as reusable playbooks and run the bundled scripts directly.
 - The `scripts/` and `references/` folders are agent-agnostic; `SKILL.md` is the Codex-oriented entrypoint.
 
+The repository root is also a router skill:
+
+- `SKILL.md`
+  An umbrella router that chooses the right focused skill for OpenReview submissions, reviewer rebuttals, human validation, LaTeX page reduction, GitHub publishing, API-first web automation, and multi-PR research engineering.
+
 ## Structure
 
 - `openreview-submit/`
@@ -35,6 +40,7 @@ It is designed to work across agents:
 
 For Codex:
 
+- Copy or symlink the whole repo into `~/.codex/skills/AIResearchSkill/` to use the root router skill.
 - Copy a skill folder into `~/.codex/skills/`
 - Or clone this repo and copy the specific folders you want
 
@@ -52,3 +58,5 @@ Each skill contains:
 - `agents/openai.yaml`
 - `scripts/`
 - `references/`
+
+Some lightweight skills may omit `scripts/` or `references/` when the workflow does not need bundled resources.
