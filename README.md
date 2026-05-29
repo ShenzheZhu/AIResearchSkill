@@ -28,6 +28,9 @@ It is designed to work across agents:
 - `prolific-human-validation/`
   Design and run Prolific human-validation studies for AI research claims and rebuttals, especially AI Task Builder Batch workflows for scenario realism, failure-label validity, multi-user specificity, and failure-severity validation. Includes scripts for creating draft studies, pulling ATB reports, and summarizing results into rebuttal-ready tables.
 
+- `evidence-first-rebuttal/`
+  Draft, audit, run supporting experiments for, and polish OpenReview-style paper rebuttals with reviewer-by-reviewer structure, evidence ledgers, paper-aligned preflight/smoke/full-run discipline, Markdown-ready tables, page-limit handling, agent-style review, and direct non-sycophantic wording.
+
 ## Usage
 
 For Codex:

@@ -23,6 +23,9 @@ Use this repository as a cross-agent toolkit.
 - `latex-page-reduction/`
   Use when a LaTeX paper exceeds its page limit. Covers priority-ordered trimming techniques, hard rules (no [H]→[t], no content deletion, no em dashes), and merge-conflict handling with Overleaf.
 
+- `evidence-first-rebuttal/`
+  Use for OpenReview-style rebuttal drafting, experiment planning/runs, and final polish. Covers reviewer-by-reviewer issue mapping, evidence ledgers, paper-aligned preflight/smoke/full-run discipline, Markdown tables, page-limit constraints, agent-style review, and direct non-sycophantic wording.
+
 ## Operating rule
 
 Prefer the stable interface in this order:
