@@ -190,6 +190,12 @@ code, stdout, stderr, source snapshot, and classification.
 
 ## Classification and retry
 
+A named witness/domain preparation gap is a semantic failure, not an execution
+attempt. Record it with `scheduler.py fail --failure-class semantic --message`
+and its evidence; keep the coverage row unverified. Refine the governing
+specification/reasoning before replanning that candidate. Do not repeatedly
+redispatch the unchanged preparation or manufacture an execution result.
+
 | Validated execution result | Canonical receipt | Final report status |
 | --- | --- | --- |
 | completed `CONFIRMED` | `confirmed` | `confirmed`; stop |
