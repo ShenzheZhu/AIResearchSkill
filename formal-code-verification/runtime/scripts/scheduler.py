@@ -465,6 +465,8 @@ def _validate(target, job, result=None, *, snapshot_commit=None):
         if not isinstance(attempts, list) or len(attempts) < index: return "Bug Validator result must append the current probe to attempts"
         if report.get("snapshot_commit") != snapshot_commit: return "Bug Validator report snapshot does not match accepted analysis"
         if report.get("confirmation_status") not in state.BUG_FINAL_STATUSES: return "Bug Validator report has invalid confirmation status"
+        if report["confirmation_status"] == "rejected" and any(recorded.get("classification") != "not_reproduced" for recorded in attempts if isinstance(recorded, dict)):
+            return "rejected requires completed negative probes; inconclusive attempts remain unresolved"
         latest = attempts[-1] if attempts else None
         dynamic_ok, dynamic_reason = state._dynamic_attempt_ready(target, latest, snapshot_commit)
         if not dynamic_ok: return f"Bug Validator current attempt lacks valid dynamic evidence: {dynamic_reason}"

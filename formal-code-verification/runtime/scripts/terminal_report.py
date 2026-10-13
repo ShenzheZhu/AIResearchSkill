@@ -91,13 +91,17 @@ def _bug_results(target: Path, snapshot_commit: str, candidates: set[str]) -> li
             continue
         if status == "rejected" and any(item.get("classification") == "confirmed" for item in dynamic):
             continue
-        latest = dynamic[-1]
-        evidence = latest.get("dynamic_evidence", {})
-        result_path = evidence.get("reproduction_result") if isinstance(evidence, dict) else None
-        reproduction = state.read_json(target / result_path, {}) if isinstance(result_path, str) else {}
-        evidence_reason = reproduction.get("reason") if isinstance(reproduction, dict) else None
-        if not isinstance(evidence_reason, str) or not evidence_reason.strip():
-            evidence_reason = "recorded dynamic evidence did not provide a more specific reason"
+        attempt_evidence = []
+        for attempt in dynamic:
+            result_path = attempt["dynamic_evidence"]["reproduction_result"]
+            reproduction = state.read_json(target / result_path, {})
+            evidence_reason = reproduction.get("reason")
+            if not isinstance(evidence_reason, str) or not evidence_reason.strip():
+                evidence_reason = "recorded dynamic evidence did not provide a more specific reason"
+            attempt_evidence.append({
+                "ordinal": attempt["ordinal"], "classification": attempt["classification"],
+                "state": reproduction.get("state"), "reason": evidence_reason,
+            })
         if status == "rejected":
             interpretation = "not reproduced by the recorded sufficient dynamic attempts; this does not prove that no defect exists"
         elif status == "inconclusive":
@@ -108,8 +112,9 @@ def _bug_results(target: Path, snapshot_commit: str, candidates: set[str]) -> li
             "function_id": function_id,
             "status": status,
             "attempt_count": len(dynamic),
+            "attempts": attempt_evidence,
             "result_path": relative,
-            "evidence_reason": evidence_reason,
+            "evidence_reason": attempt_evidence[-1]["reason"],
             "interpretation": interpretation,
         })
     return results
@@ -143,6 +148,7 @@ def _business_coverage(target: Path, snapshot_commit: str) -> dict:
         if not isinstance(evidence, list):
             return {**missing, "status": "invalid", "reason": "coverage evidence must be a list"}
         levels, outcomes = set(), set()
+        native_job, recorded_attempts, function = None, set(), None
         for item in evidence:
             if not isinstance(item, dict) or item.get("level") not in {"reasoning", "actual-code", "integration", "machine-verifier"}:
                 return {**missing, "status": "invalid", "reason": "coverage evidence has an invalid level"}
@@ -152,16 +158,39 @@ def _business_coverage(target: Path, snapshot_commit: str) -> dict:
             levels.add(item["level"])
             if row["status"] != "unknown" and item["level"] != "reasoning":
                 import bug_validation_executor
+                import scheduler
+                if item["level"] != "actual-code":
+                    return {**missing, "status": "invalid", "reason": "native Bug Validation qualifies only actual-code; unvalidated integration or machine-verifier coverage must remain unknown"}
                 result = state.read_json(evidence_path, {})
                 try:
+                    if native_job is None:
+                        function_id = row.get("function_id")
+                        index = state.source_index(target) or {}
+                        function = next((entry for entry in index.get("functions", []) if isinstance(entry, dict) and entry.get("id") == function_id), None)
+                        if not isinstance(function_id, str) or not function_id or index.get("schema_version") != 2 or index.get("snapshot_commit") != snapshot_commit or not isinstance(function, dict):
+                            raise ValueError("coverage function is absent from the current source index")
+                        artifact = state.fm_dir(target) / "extracted_functions" / function["artifact"]
+                        spec = state.read_json(Path(f"{artifact}.spec.json"), {})
+                        verification = state.read_json(state.fm_dir(target) / "logic_verification_results" / Path(function["artifact"]).with_suffix(".json"), {})
+                        valid, _ = state.verification_result_ready(target, artifact, function_id, verification, snapshot_commit)
+                        if not valid or verification.get("verdict") != "MISMATCH" or row["requirement"] != spec.get("post_condition"):
+                            raise ValueError("coverage requirement must equal the assigned validated specification postcondition")
+                        plan = state.read_json(state.control_dir(target) / "job_plans" / "bug_validation.json", {})
+                        entry = next((value for value in plan.get("entries", []) if isinstance(value, dict) and value.get("function_id") == function_id), None)
+                        if plan.get("schema_version") != 1 or plan.get("phase") != "bug_validation" or plan.get("snapshot_commit") != snapshot_commit or not isinstance(entry, dict):
+                            raise ValueError("coverage function has no current planned Bug Validation job")
+                        native_job = scheduler.accepted_job(target, entry["job_id"], snapshot_commit=snapshot_commit, input_fingerprint=state.active_record(target).get("fingerprint", ""))
+                        if native_job["input"]["function_id"] != function_id:
+                            raise ValueError("coverage function does not own the accepted Bug Validation job")
+                        report = state.read_json(target / native_job["bug_result_path"], {})
+                        recorded_attempts = {(attempt["ordinal"], attempt["dynamic_evidence"]["reproduction_result"]) for attempt in report["attempts"]}
                     bug_id, attempt = result["bug_id"], result["attempt"]
                     expected = bug_validation_executor.attempt_dir(target, bug_id, attempt) / "reproduction_result.json"
-                    job = {"attempts": attempt, "input": {"bug_id": bug_id, "mode": "full"}}
-                    if evidence_path != expected or result.get("state") != "completed" or not bug_validation_executor.execution_result_valid(target, job, snapshot_commit=snapshot_commit):
-                        raise ValueError("execution is unavailable or invalid")
+                    if bug_id != native_job["input"]["bug_id"] or evidence_path != expected or (attempt, evidence_path.relative_to(target).as_posix()) not in recorded_attempts or result.get("state") != "completed" or result.get("language") != function.get("language"):
+                        raise ValueError("execution does not belong to the assigned accepted Bug Validation attempt")
                     outcomes.add(result["classification"])
-                except (KeyError, TypeError, ValueError, OSError):
-                    return {**missing, "status": "invalid", "reason": "passed/failed coverage requires completed, validated execution evidence"}
+                except (KeyError, TypeError, ValueError, OSError) as exc:
+                    return {**missing, "status": "invalid", "reason": f"passed/failed coverage requires assigned accepted execution evidence: {exc}"}
         if row["status"] != "unknown" and not levels.intersection({"actual-code", "integration", "machine-verifier"}):
             return {**missing, "status": "invalid", "reason": "passed/failed business rows require execution evidence, not reasoning alone"}
         if (row["status"] == "passed" and ("not_reproduced" not in outcomes or "confirmed" in outcomes)) or (row["status"] == "failed" and "confirmed" not in outcomes):
@@ -224,7 +253,7 @@ def build(target: Path) -> dict:
         "schema_version": 1,
         "official_result_available": official,
         "status": "unavailable" if authority_unavailable else "official" if official else "incomplete",
-        "audit_status": "incomplete" if not official or coverage["status"] != "available" else "completed_with_gaps" if reasoning_gaps or coverage["counts"]["unknown"] else "completed",
+        "audit_status": "incomplete" if not official or coverage["status"] != "available" else "completed_with_gaps" if reasoning_gaps or report_inconclusive or coverage["counts"]["unknown"] else "completed",
         "reason": reason,
         "snapshot_commit": checked["snapshot_commit"],
         "analysis_fingerprint": state.active_record(target).get("fingerprint"),

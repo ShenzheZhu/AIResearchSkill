@@ -196,7 +196,7 @@ def agent_execution_result_valid(target: Path, job: dict, *, snapshot_commit: st
         return False
     commands = result["commands"]
     observed, _ = output_classification(
-        "\n".join(item["stdout"] for item in commands),
+        commands[-1]["stdout"] if commands else "",
         next((item["returncode"] for item in commands if item["returncode"] != 0), 0),
     )
     if result["state"] == "unsupported":

@@ -30,9 +30,9 @@ class TerminalCoverageTest(unittest.TestCase):
              patch.object(terminal_report, "_verification_results", return_value=verification):
             return terminal_report.build(target)
 
-    def row(self, *, status="failed", evidence=None, row_id="public-result") -> dict:
+    def row(self, *, status="failed", evidence=None, row_id="public-result", function_id="calc.py::inc", requirement="returns x + 2") -> dict:
         return {
-            "id": row_id, "flow": "Public calc entry", "requirement": "The entry returns the specified result",
+            "id": row_id, "flow": "Public calc entry", "function_id": function_id, "requirement": requirement,
             "status": status, "limitation": "One recorded probe covers this input only",
             "evidence": evidence if evidence is not None else [{
                 "level": "actual-code", "path": "fm_agent_skill/probes/candidate/attempt_001/reproduction_result.json",
@@ -70,6 +70,37 @@ class TerminalCoverageTest(unittest.TestCase):
             self.assertEqual(report["business_coverage"]["counts"], {"passed": 0, "failed": 1, "unknown": 0})
             self.assertEqual(report["audit_status"], "completed_with_gaps")
 
+    def test_dynamic_inconclusive_alone_keeps_audit_gaps_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary).resolve()
+            verification = self.prepared(target)
+            write_accepted_candidate(target, "calc.py::dynamic_gap", "dynamic-gap", "inconclusive")
+            verification.append({"function_id": "calc.py::dynamic_gap", "verdict": "MISMATCH"})
+            self.coverage(target, [self.row()])
+            report = self.build(target, verification)
+            self.assertEqual(report["reasoning"]["gaps"], [])
+            self.assertEqual(report["business_coverage"]["counts"]["unknown"], 0)
+            self.assertEqual(report["audit_status"], "completed_with_gaps")
+            self.assertEqual(report["findings"]["inconclusive"][0]["attempts"], [{
+                "ordinal": 1, "classification": "inconclusive", "state": "completed",
+                "reason": "Recorded public-entry probe outcome",
+            }])
+
+    def test_prior_unavailable_execution_remains_visible_after_a_negative_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary).resolve()
+            write_accepted_candidate(target, status="inconclusive", prior_unsupported=True)
+            state.atomic_json(checkpoint.root(target) / "official_result.json", {"official_result_available": True})
+            self.coverage(target, [self.row(status="unknown", evidence=[])])
+            report = self.build(target, [{"function_id": "calc.py::inc", "verdict": "MISMATCH"}])
+            finding = report["findings"]["inconclusive"][0]
+            self.assertEqual(finding["attempt_count"], 2)
+            self.assertEqual(finding["attempts"], [
+                {"ordinal": 1, "classification": "inconclusive", "state": "unsupported", "reason": "Required persistence service unavailable"},
+                {"ordinal": 2, "classification": "not_reproduced", "state": "completed", "reason": "Recorded public-entry probe outcome"},
+            ])
+            self.assertEqual(report["audit_status"], "completed_with_gaps")
+
     def test_missing_and_invalid_coverage_cannot_complete_the_audit(self) -> None:
         for case in ("missing", "empty", "foreign_snapshot", "passed_reasoning", "failed_reasoning", "missing_evidence", "duplicate"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
@@ -98,7 +129,9 @@ class TerminalCoverageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary).resolve()
             verification = self.prepared(target)
-            self.coverage(target, [self.row(status="unknown", evidence=[])])
+            row = self.row(status="unknown", evidence=[])
+            del row["function_id"]
+            self.coverage(target, [row])
             report = self.build(target, verification)
             self.assertEqual(report["business_coverage"]["status"], "available")
             self.assertEqual(report["business_coverage"]["counts"]["unknown"], 1)
@@ -114,7 +147,7 @@ class TerminalCoverageTest(unittest.TestCase):
                     result = state.read_json(target / path, {})
                     result.update(state="unsupported", classification="inconclusive", commands=[])
                     state.atomic_json(target / path, result)
-                    self.coverage(target, [self.row(status=status, evidence=[{"level": level, "path": path}])])
+                    self.coverage(target, [self.row(status=status, function_id="calc.py::gap", evidence=[{"level": level, "path": path}])])
                     coverage = terminal_report._business_coverage(target, "unversioned")
                     self.assertEqual(coverage["status"], "invalid")
         with tempfile.TemporaryDirectory() as temporary:
@@ -123,8 +156,45 @@ class TerminalCoverageTest(unittest.TestCase):
             self.coverage(target, [self.row(status="passed")])
             self.assertEqual(terminal_report._business_coverage(target, "unversioned")["status"], "invalid")
             write_accepted_candidate(target, "calc.py::negative", "negative", "rejected")
-            self.coverage(target, [self.row(status="passed", evidence=[{"level": "actual-code", "path": "fm_agent_skill/probes/negative/attempt_001/reproduction_result.json"}])])
+            self.coverage(target, [self.row(status="passed", function_id="calc.py::negative", requirement="returns x + 1", evidence=[{"level": "actual-code", "path": "fm_agent_skill/probes/negative/attempt_001/reproduction_result.json"}])])
             self.assertEqual(terminal_report._business_coverage(target, "unversioned")["counts"]["passed"], 1)
+
+    def test_native_coverage_is_bound_to_assigned_requirement_and_accepted_job(self) -> None:
+        for case in ("no_function", "other_function", "other_requirement", "other_bug", "no_receipt", "foreign_index", "foreign_plan", "integration", "machine-verifier"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                target = Path(temporary).resolve()
+                self.prepared(target)
+                write_accepted_candidate(target, "calc.py::negative", "negative", "rejected")
+                row = self.row(status="passed", function_id="calc.py::negative", requirement="returns x + 1", evidence=[{
+                    "level": "actual-code", "path": "fm_agent_skill/probes/negative/attempt_001/reproduction_result.json",
+                }])
+                if case == "no_function":
+                    del row["function_id"]
+                elif case == "other_function":
+                    row["function_id"] = "calc.py::inc"
+                elif case == "other_requirement":
+                    row["requirement"] = "Successful reservations survive restart"
+                elif case == "other_bug":
+                    row["function_id"] = "calc.py::inc"
+                    row["requirement"] = "returns x + 2"
+                elif case == "no_receipt":
+                    connection = scheduler._connect(target)
+                    connection.execute("DELETE FROM receipts WHERE job_id='bug-validation-negative'")
+                    connection.close()
+                elif case in {"foreign_index", "foreign_plan"}:
+                    path = state.control_dir(target) / ("analysis_index.json" if case == "foreign_index" else "job_plans/bug_validation.json")
+                    data = state.read_json(path, {})
+                    data["snapshot_commit"] = "another-snapshot"
+                    state.atomic_json(path, data)
+                else:
+                    row["evidence"][0]["level"] = case
+                self.coverage(target, [row])
+                self.assertEqual(terminal_report._business_coverage(target, "unversioned")["status"], "invalid")
+                row["status"] = "unknown"
+                self.coverage(target, [row])
+                coverage = terminal_report._business_coverage(target, "unversioned")
+                self.assertEqual(coverage["counts"]["unknown"], 1)
+                self.assertEqual(coverage["rows"], [row])
 
     def test_empty_or_failed_scheduler_has_no_official_findings(self) -> None:
         for case in ("empty", "error"):

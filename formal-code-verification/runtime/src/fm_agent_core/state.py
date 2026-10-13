@@ -831,9 +831,10 @@ def bug_validation_ready(project: Path, candidate_ids: set[str]) -> tuple[bool, 
         status = report["confirmation_status"]
         if status == "confirmed" and latest != "confirmed":
             return False, f"confirmed bug lacks confirmed dynamic evidence for {function_id}"
-        if status == "rejected" and latest != "not_reproduced":
+        if status == "rejected" and any(attempt["classification"] != "not_reproduced" for attempt in attempts):
             return False, f"rejected bug lacks executed non-reproduction evidence for {function_id}"
-        if status == "inconclusive" and latest != "inconclusive":
+        retained_inconclusive = any(attempt["classification"] == "inconclusive" for attempt in attempts[:-1])
+        if status == "inconclusive" and not (latest == "inconclusive" or latest == "not_reproduced" and retained_inconclusive):
             return False, f"inconclusive bug has an incompatible final attempt for {function_id}"
         counts[status] += 1
     for status, count in counts.items():

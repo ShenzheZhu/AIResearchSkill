@@ -19,44 +19,90 @@ import bug_validation_executor
 import scheduler
 
 
-def write_accepted_candidate(target: Path, function_id="calc.py::inc", bug_id="candidate", status="confirmed") -> dict:
+def write_accepted_candidate(target: Path, function_id="calc.py::inc", bug_id="candidate", status="confirmed", *, prior_unsupported=False) -> dict:
     snapshot = state.current_snapshot_commit(target)
     if not state.active_record(target):
         state.atomic_json(state.skill_dir(target) / "active.json", {
             "snapshot_commit": snapshot, "fingerprint": "receipt-check",
             "mode": "full", "phases": ["bug_validation"], "current_phase": "bug_validation",
         })
+    source_path, symbol = function_id.split("::", 1)
+    index_path = state.control_dir(target) / "analysis_index.json"
+    index = state.read_json(index_path, {"functions": []})
+    item = next((entry for entry in index["functions"] if entry.get("id") == function_id), None)
+    if item is None:
+        item = {"id": function_id, "artifact": f"{bug_id}{Path(source_path).suffix}"}
+        index["functions"].append(item)
+    language = "python" if Path(source_path).suffix == ".py" else "c"
+    source = target / source_path
+    source.parent.mkdir(parents=True, exist_ok=True)
+    code = f"def {symbol}(x):\n    return x + 1\n" if language == "python" else f"int {symbol}(int x) {{ return x + 1; }}\n"
+    if not source.exists():
+        source.write_text(code, encoding="utf-8")
+    elif code not in source.read_text(encoding="utf-8"):
+        source.write_text(source.read_text(encoding="utf-8") + code, encoding="utf-8")
+    source_text = source.read_text(encoding="utf-8")
+    line_start = source_text[:source_text.index(code)].count("\n") + 1
+    item.update(path=source_path, language=language, line_start=line_start, line_end=line_start + len(code.splitlines()) - 1)
+    index.update(schema_version=2, snapshot_commit=snapshot)
+    state.atomic_json(index_path, index)
+    artifact = state.fm_dir(target) / "extracted_functions" / item["artifact"]
+    if not artifact.exists():
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(code, encoding="utf-8")
+    spec_path = Path(f"{artifact}.spec.json")
+    if not spec_path.exists():
+        state.atomic_json(spec_path, {
+            "signature": f"{symbol}(x)", "pre_condition": "x is an integer",
+            "post_condition": "returns x + 1" if status == "rejected" else "returns x + 2",
+        })
+    state.atomic_json(Path(f"{artifact}.info.json"), {"callees": []})
+    verification_path = state.fm_dir(target) / "logic_verification_results" / Path(item["artifact"]).with_suffix(".json")
+    if not verification_path.exists():
+        state.atomic_json(verification_path, {
+            "schema_version": 2, "function_id": function_id, "snapshot_commit": snapshot,
+            "verdict": "MISMATCH", "gaps": None, "error": None,
+            "reasoning": {"actual_postcondition": "returns x + 1", "spec_postcondition": state.read_json(spec_path, {})["post_condition"],
+                          "counterexample": "x=1 returns a different value than the reasoned candidate", "offending_statements": "return x + 1",
+                          "reason": "The reasoned return contract requires dynamic validation"},
+        })
     output = f"fm_agent/bug_validation/{bug_id}.result.json"
     job = scheduler.create(target, {
         "id": f"bug-validation-{bug_id}", "phase": "bug_validation", "type": "bug_validate",
-        "depends_on": [], "required_outputs": [output], "artifacts": [], "negative_retries": 0,
+        "depends_on": [], "required_outputs": [output], "artifacts": [], "negative_retries": 1 if prior_unsupported else 0,
         "input": {"bug_id": bug_id, "function_id": function_id, "mode": "full"},
     })
-    scheduler.transition(target, job["id"], "start", None, None, "execution")
-    root = bug_validation_executor.attempt_dir(target, bug_id, 1)
     entrypoint = {"ecosystem": "host-project-toolchain", "kind": "module", "target": "calc.py", "symbol": "inc"}
-    state.atomic_json(root / "reproduction.json", {
-        "schema_version": 2, "bug_id": bug_id, "attempt": 1, "snapshot_commit": snapshot,
-        "language": "python", "public_entrypoint": entrypoint, "probe_file": "probe.py",
-        "expected_marker": "CONFIRMED", "not_confirmed_marker": "NOT CONFIRMED", "timeout_seconds": 30,
-    })
-    marker = {"confirmed": "CONFIRMED", "rejected": "NOT CONFIRMED", "inconclusive": "no outcome marker"}[status]
-    classification = "not_reproduced" if status == "rejected" else status
-    (root / "probe.py").write_text(f"print({marker!r})\n", encoding="utf-8")
-    evidence = (root / "reproduction_result.json").relative_to(target).as_posix()
-    state.atomic_json(target / evidence, {
-        "schema_version": 1, "execution_mode": "agent-executed", "bug_id": bug_id, "attempt": 1,
-        "snapshot_commit": snapshot, "language": "python", "public_entrypoint": entrypoint,
-        "state": "completed", "classification": classification, "reason": "Recorded public-entry probe outcome",
-        "commands": [{"command": "python3 probe.py", "cwd": root.relative_to(target).as_posix(),
-                      "returncode": 0, "stdout": marker + "\n", "stderr": ""}],
-    })
-    state.atomic_json(target / output, {
-        "schema_version": 1, "bug_id": bug_id, "function_id": function_id, "snapshot_commit": snapshot,
-        "confirmation_status": status,
-        "attempts": [{"ordinal": 1, "classification": classification, "dynamic_evidence": {"reproduction_result": evidence}}],
-    })
-    accepted = scheduler.transition(target, job["id"], "complete", bug_validation_executor.canonical_finalization_receipt(target, job), None, "execution")
+    attempts = []
+    for ordinal in range(1, 3 if prior_unsupported else 2):
+        job = scheduler.transition(target, job["id"], "start", None, None, "execution")
+        root = bug_validation_executor.attempt_dir(target, bug_id, ordinal)
+        state.atomic_json(root / "reproduction.json", {
+            "schema_version": 2, "bug_id": bug_id, "attempt": ordinal, "snapshot_commit": snapshot,
+            "language": "python", "public_entrypoint": entrypoint, "probe_file": "probe.py",
+            "expected_marker": "CONFIRMED", "not_confirmed_marker": "NOT CONFIRMED", "timeout_seconds": 30,
+        })
+        classification = ("inconclusive" if ordinal == 1 else "not_reproduced") if prior_unsupported else "not_reproduced" if status == "rejected" else status
+        marker = {"confirmed": "CONFIRMED", "not_reproduced": "NOT CONFIRMED", "inconclusive": "no outcome marker"}[classification]
+        unsupported = prior_unsupported and ordinal == 1
+        (root / "probe.py").write_text(f"print({marker!r})\n", encoding="utf-8")
+        evidence = (root / "reproduction_result.json").relative_to(target).as_posix()
+        state.atomic_json(target / evidence, {
+            "schema_version": 1, "execution_mode": "agent-executed", "bug_id": bug_id, "attempt": ordinal,
+            "snapshot_commit": snapshot, "language": "python", "public_entrypoint": entrypoint,
+            "state": "unsupported" if unsupported else "completed", "classification": classification,
+            "reason": "Required persistence service unavailable" if unsupported else "Recorded public-entry probe outcome",
+            "commands": [] if unsupported else [{"command": "python3 probe.py", "cwd": root.relative_to(target).as_posix(),
+                          "returncode": 0, "stdout": marker + "\n", "stderr": ""}],
+        })
+        attempts.append({"ordinal": ordinal, "classification": classification, "dynamic_evidence": {"reproduction_result": evidence}})
+        state.atomic_json(target / output, {
+            "schema_version": 1, "bug_id": bug_id, "function_id": function_id, "snapshot_commit": snapshot,
+            "confirmation_status": status, "attempts": attempts,
+        })
+        accepted = scheduler.transition(target, job["id"], "complete", bug_validation_executor.canonical_finalization_receipt(target, job), None, "execution")
+        if prior_unsupported and ordinal == 1:
+            scheduler.transition(target, job["id"], "retry", None, None, "execution")
     plan_path = state.control_dir(target) / "job_plans" / "bug_validation.json"
     entries = state.read_json(plan_path, {}).get("entries", [])
     entries.append({"function_id": function_id, "job_id": job["id"]})
@@ -143,7 +189,9 @@ class AcceptedBugEvidenceTest(unittest.TestCase):
                            "returncode": 0, "stdout": "CONFIRMED\n", "stderr": ""})
             state.atomic_json(root / "reproduction_result.json", result)
             self.assertTrue(bug_validation_executor.execution_result_valid(target, job))
-            for stdout, returncode in (("", 0), ("NOT CONFIRMED\n", 0), ("CONFIRMED\n", 1)):
+            for stdout, returncode in (("", 0), ("NOT CONFIRMED\n", 0), ("CONFIRMED\n", 1),
+                                       ("build succeeded\nCONFIRMED\n", 0), ("CONFIRMED verifier success\n", 0),
+                                       ("CONFIRMED\nCONFIRMED\n", 0)):
                 result.update({"stdout": stdout, "returncode": returncode})
                 state.atomic_json(root / "reproduction_result.json", result)
                 self.assertFalse(bug_validation_executor.execution_result_valid(target, job))

@@ -151,8 +151,8 @@ def next_step(target: Path, limit: int, host: str) -> dict:
     scheduled = durable_executor.next_actions(target, limit, host=host)
     if scheduled["action"] == "dispatch":
         return {**scheduled, "action": "dispatch_workers", "phase": phase}
-    if scheduled["action"] == "wait_for_completion_event":
-        return {**scheduled, "action": "wait_for_completion_event", "phase": phase}
+    if scheduled["action"] in {"wait_for_completion_event", "phase_failed"}:
+        return {**scheduled, "phase": phase}
 
     if static_job is not None:
         if static_job.get("status") != "succeeded":

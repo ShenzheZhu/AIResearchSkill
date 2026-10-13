@@ -133,13 +133,13 @@ def command_for(target: Path, root: Path, contract: dict, scratch: Path) -> tupl
 def output_classification(stdout: str, returncode: int) -> tuple[str, str]:
     if returncode != 0:
         return "runtime_error", "probe exited with a non-zero status"
-    confirmed = bool(re.search(r"(?m)^CONFIRMED(?:\s|$)", stdout))
-    not_confirmed = bool(re.search(r"(?m)^NOT CONFIRMED(?:\s|$)", stdout))
-    if confirmed and not not_confirmed:
+    lines = stdout.splitlines()
+    markers = [line for line in lines if line in {"CONFIRMED", "NOT CONFIRMED"}]
+    if not lines or lines[0] not in {"CONFIRMED", "NOT CONFIRMED"} or len(markers) != 1:
+        return "inconclusive", "probe did not emit exactly one required first-line confirmation marker"
+    if lines[0] == "CONFIRMED":
         return "confirmed", "probe reproduced the specified behavior mismatch"
-    if not_confirmed and not confirmed:
-        return "not_reproduced", "probe completed without reproducing the candidate"
-    return "inconclusive", "probe did not emit exactly one required confirmation marker"
+    return "not_reproduced", "probe completed without reproducing the candidate"
 
 
 def run(target: Path, bug_id: str, attempt: int) -> dict:

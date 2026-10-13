@@ -97,7 +97,24 @@ Record the ledger before finalization. Its minimal schema is:
 }
 ```
 
-Evidence entries name a project-relative `path` and a `level`: `reasoning`, `actual-code`, `integration`, or `machine-verifier`. Passed/failed rows require completed execution validated through the runtime's reproduction-result contract; a claimed level or existing file is insufficient. `confirmed` supports a failed obligation; a successful negative probe supports only the explicitly bounded passed case. Unsupported, inconclusive, raw build logs and other unvalidated records keep the obligation unknown. Unknown rows remain visible and may link reasoning artifacts. After execution, update the same row and its limits rather than creating duplicate coverage.
+Evidence entries name a project-relative `path` and a `level`: `reasoning`,
+`actual-code`, `integration`, or `machine-verifier`. A passed/failed native
+Bug Validation row also names its assigned `function_id`; its `requirement`
+must exactly equal that function's independently derived `.spec.json`
+`post_condition`. The current source index, planned job, accepted receipt and
+named execution attempt must all belong to that assignment and snapshot.
+Reusing a budget-check probe for a persistence postcondition is invalid even
+when both are part of the same flow. Native Bug Validation receipts qualify
+only `actual-code`: calling one `integration` or `machine-verifier` does not
+establish that evidence level. Such rows remain unknown until the runtime can
+independently validate the relevant evidence type; do not invent an adapter.
+`confirmed` supports the assigned failed obligation. A successful negative
+probe supports only that exact postcondition for its recorded inputs and
+schedule, which must be stated in `limitation`; it never passes the whole flow.
+Unsupported, inconclusive, raw build logs and other unvalidated records keep
+the obligation unknown. Unknown rows remain visible without a function
+binding and may link reasoning or external-tool artifacts. After execution,
+update the same row and its limits rather than creating duplicate coverage.
 
 Keep evidence levels distinct: **LLM reasoning** is a model-derived MATCH or
 static candidate; **actual-code reproduction** executes a concrete public path;
@@ -113,6 +130,6 @@ only for the claim supported by the named evidence, retaining input, schedule,
 model, and integration limits. Passing finite probes does not prove all inputs.
 Use `terminal_report.py` as the runtime's finding authority; a failed gate yields
 an incomplete report, never findings promoted from discovery notes. Report
-remaining flows, unknown requirements, and skipped execution explicitly. Check `reasoning.counts/gaps`, qualified dynamic result counts, and `business_coverage` separately. Missing/invalid coverage or unavailable accepted receipts leaves `audit_status: incomplete`; do not call the audit complete. Unknown coverage with actual limitations is `completed_with_gaps`, not universal correctness. Continue pending executable obligations before closing, and retain genuine environment/requirement blockers visibly. Never
+remaining flows, unknown requirements, and skipped execution explicitly. Check `reasoning.counts/gaps`, qualified dynamic result counts, and `business_coverage` separately. Missing/invalid coverage or unavailable accepted receipts leaves `audit_status: incomplete`; do not call the audit complete. Unknown coverage or any dynamic inconclusive candidate is `completed_with_gaps`, not universal correctness. Each compact dynamic finding retains every attempt's ordinal, classification, execution state and reason so a later negative probe cannot hide earlier unavailable execution. Continue pending executable obligations before closing, and retain genuine environment/requirement blockers visibly. Never
 claim zero bugs, universal correctness, or whole-repository coverage from a
 clean batch, reasoning MATCH, or passing tests.
