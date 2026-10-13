@@ -45,7 +45,7 @@ For `MATCH` and `MISMATCH`, replace `reasoning` with exactly:
 ```
 
 For `MISMATCH`, `counterexample`, `offending_statements`, and `reason` must all
-be non-empty. `offending_statements` must be one exact contiguous quote from
+be non-empty strings, never nested JSON objects or arrays. `offending_statements` must be one exact contiguous quote from
 the extracted function without line-number prefixes. For `MATCH`, the
 counterexample and offending statements remain null. In both cases B must
 equal the exact native spec postcondition. For `MISMATCH`, `candidates` contains one object per independent violation:

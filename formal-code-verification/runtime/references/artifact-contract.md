@@ -106,7 +106,7 @@ Verification result is exactly
 with `schema_version: 3`. Earlier verification formats cannot qualify a new run. `MATCH` and `MISMATCH` require `reasoning` exactly equal to
 `{actual_postcondition,spec_postcondition,counterexample,offending_statements,reason}`.
 The specification postcondition must equal the sidecar text. `MISMATCH` also
-requires a normative or inferred contract, non-empty concrete counterexample,
+requires a normative or inferred contract, non-empty concrete counterexample string,
 reason, and an exact contiguous source quote in `offending_statements`;
 `MATCH` requires the same independent contract basis and null
 counterexample/offending statements.

@@ -608,7 +608,7 @@ def _postcondition_reasoning_ready(artifact: Path, spec: dict, reasoning, mismat
         return False, "reasoning reason must be a bounded string"
     if mismatch:
         if not all(_nonempty_text(value) for value in (counterexample, statements, reason)):
-            return False, "MISMATCH requires a concrete counterexample, exact offending statements, and reason"
+            return False, "MISMATCH requires counterexample, exact offending statements, and reason as non-empty strings"
         source = artifact.read_text(encoding="utf-8", errors="replace")
         if statements not in source:
             return False, "MISMATCH offending statements are not an exact quote from the extracted function"
