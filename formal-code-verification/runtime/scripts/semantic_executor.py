@@ -18,12 +18,15 @@ from pathlib import Path
 
 from _common import project, state
 import scheduler
+import incremental
 from fm_agent_core import worker_contracts
+from fm_agent_core import loop_evidence
 
 
-SUPPORTED_PHASES = {"specification", "verification", "verify_affected"}
+SUPPORTED_PHASES = {"specification", "verification", "verify_affected", "select_scope", "update_specs"}
 WORKERS = {kind: worker_contracts.for_job_type(kind) for kind in (
     "domain_context", "spec_batch", "verify_function", "verify_batch",
+    "select_relevant_modules", "select_relevant_files", "incremental_spec_plan", "reconcile_caller_info",
 )}
 PUBLIC_INTERFACE_SUFFIXES = {".h", ".hh", ".hpp", ".hxx", ".inc", ".inl"}
 
@@ -34,11 +37,10 @@ def _active(target: Path, phase: str) -> dict:
     record = state.active_record(target)
     if not isinstance(record, dict) or record.get("status") != "running":
         raise ValueError("semantic execution requires a running FM-Agent analysis")
-    if phase != record.get("current_phase") and phase not in record.get("phases", []) and not (
-        phase == "verification" and record.get("mode") == "full"
-        or phase == "verify_affected" and record.get("mode") == "incremental"
-    ):
-        raise ValueError(f"phase is not part of the active DAG: {phase}")
+    if phase != record.get("current_phase"):
+        raise ValueError(f"cannot execute {phase} while earliest incomplete phase is {record.get('current_phase')}")
+    if phase == "verify_affected" and incremental.decision(target).get("update_complete") is not True:
+        raise ValueError("affected verification requires settled incremental contracts")
     if record.get("snapshot_commit") != state.current_snapshot_commit(target):
         raise ValueError("active analysis snapshot does not match the current worktree")
     plan = state.read_json(state.control_dir(target) / "job_plans" / f"{phase}.json", None)
@@ -48,7 +50,7 @@ def _active(target: Path, phase: str) -> dict:
 
 
 def _phase_jobs(target: Path, phase: str) -> list[dict]:
-    return scheduler.jobs_for_phase(target, phase)
+    return scheduler.current_jobs_for_phase(target, phase)
 
 
 def _verification_expected(target: Path, phase: str) -> set[str]:
@@ -68,10 +70,15 @@ def _remove_unassigned_verification_results(target: Path, phase: str) -> list[st
     removed = []
     for path in sorted(root.rglob("*.json")) if root.is_dir() else []:
         rel = path.relative_to(target).as_posix()
-        if rel not in expected:
+        if rel not in expected and not (phase == "verify_affected" and state.retained_function(target, _function_id_for_result(target, rel))):
             path.unlink()
             removed.append(rel)
     return removed
+
+
+def _function_id_for_result(target: Path, relative: str) -> str:
+    return next((item["id"] for item in (state.source_index(target) or {}).get("functions", [])
+                 if relative == f"fm_agent/logic_verification_results/{Path(item['artifact']).with_suffix('.json').as_posix()}"), "")
 
 
 def prepare(target: Path, phase: str) -> dict:
@@ -122,6 +129,20 @@ def _related_artifacts(target: Path, artifacts: list[str]) -> set[str]:
     return related - selected
 
 
+def normative_read_paths(target: Path) -> set[str]:
+    """Share the already materialized requirements/domain evidence across reasoning stages."""
+    domain = state.fm_dir(target) / "spec_prompts" / "domain_context"
+    paths = {
+        "fm_agent/spec_prompts/domain_context/engine_overview.txt",
+        "fm_agent/spec_prompts/domain_context/user_knowledge/manifest.json",
+    }
+    paths.update(path.relative_to(target).as_posix() for path in domain.glob("phase_*_types.txt"))
+    manifest = state.read_json(domain / "user_knowledge" / "manifest.json", {})
+    paths.update(item["copied_path"] for item in manifest.get("entries", [])
+                 if isinstance(item, dict) and isinstance(item.get("copied_path"), str))
+    return {path for path in paths if (target / path).is_file()}
+
+
 def _read_paths(target: Path, job: dict) -> list[str]:
     paths = {
         f"fm_agent_skill/jobs/{job['id']}.json",
@@ -134,15 +155,15 @@ def _read_paths(target: Path, job: dict) -> list[str]:
         for phase in phases.get("phases", []):
             for module in phase.get("modules", []) if isinstance(phase, dict) else []:
                 paths.update(path for path in module.get("source_files", []) if isinstance(path, str))
-    elif kind == "spec_batch":
+    elif kind in {"spec_batch", "incremental_spec_plan", "reconcile_caller_info"}:
         paths.update({
             "fm_agent/spec_prompts/system_prompt.md",
-            "fm_agent/spec_prompts/domain_context/engine_overview.txt",
-            "fm_agent/spec_prompts/domain_context/user_knowledge/manifest.json",
             "fm_agent_skill/control/graph_edges.json",
         })
         for artifact in job.get("artifacts", []):
             paths.add(f"fm_agent/extracted_functions/{artifact}")
+            paths.add(f"fm_agent/extracted_functions/{artifact}.spec.json")
+            paths.add(f"fm_agent/extracted_functions/{artifact}.info.json")
             source = _source_for_artifact(target, artifact)
             if source:
                 paths.add(source)
@@ -168,19 +189,29 @@ def _read_paths(target: Path, job: dict) -> list[str]:
             source = _source_for_artifact(target, artifact)
             if source:
                 paths.add(source)
-        for candidate in (state.fm_dir(target) / "spec_prompts" / "domain_context").glob("phase_*_types.txt"):
-            rel = _relative(target, candidate)
-            if rel:
-                paths.add(rel)
-        manifest = state.read_json(target / "fm_agent/spec_prompts/domain_context/user_knowledge/manifest.json", {})
-        paths.update(item["copied_path"] for item in manifest.get("entries", []) if isinstance(item, dict) and isinstance(item.get("copied_path"), str))
+        paths.update(normative_read_paths(target))
+    elif kind in {"select_relevant_modules", "select_relevant_files"}:
+        paths.update({"fm_agent/phases.json", "fm_agent_skill/control/diff.json", "fm_agent_skill/control/graph_edges.json"})
+        if kind == "select_relevant_files":
+            paths.add(job["input"]["module_record"])
+            sources = set(job["input"]["source_paths"])
+        else:
+            sources = {path for module in job["input"]["modules"] for path in module["source_files"]}
+        paths.update(sources)
+        for item in incremental.functions(target).values():
+            if item["path"] in sources:
+                paths.update(f"fm_agent/extracted_functions/{item['artifact']}{suffix}" for suffix in ("", ".spec.json", ".info.json"))
     elif kind in {"verify_function", "verify_batch"}:
-        for artifact in job["artifacts"]:
+        paths.update(normative_read_paths(target))
+        paths.add("fm_agent_skill/control/graph_edges.json")
+        for artifact in set(job["artifacts"]) | _related_artifacts(target, job["artifacts"]):
             paths.update({
                 f"fm_agent/extracted_functions/{artifact}",
                 f"fm_agent/extracted_functions/{artifact}.spec.json",
                 f"fm_agent/extracted_functions/{artifact}.info.json",
             })
+    if kind in {"select_relevant_modules", "select_relevant_files", "incremental_spec_plan", "reconcile_caller_info", "domain_context"}:
+        paths.add("fm_agent_skill/control/incremental_intent.md")
     return sorted(path for path in paths if (target / path).exists())
 
 
@@ -219,13 +250,32 @@ def _ticket(target: Path, job: dict, host: str = "auto") -> dict:
         # compact receipt must equal this exact list, byte-for-byte and in
         # order.  `write_paths` remains the compatibility spelling.
         "required_outputs": list(job.get("required_outputs", [])),
+        "all_bugs": state.active_record(target).get("inputs", {}).get("config", {}).get("all_bugs", False),
+        "input": job.get("input", {}),
+        "developer_intent": state.active_record(target).get("inputs", {}).get("config", {}).get("incremental_intent", ""),
+        "reference_paths": [str(Path(__file__).resolve().parents[1] / "references" / name) for name in (
+            "specification-rules.md", "artifact-contract.md", "incremental-pipeline.md",
+        )] if job["type"] in {"incremental_spec_plan", "reconcile_caller_info"} else [],
     }
     if job.get("type") == "spec_batch":
         ticket.update({
             "repair_artifacts": repair_artifacts,
             "preserve_artifacts": preserve_artifacts,
         })
-    if job.get("attempts", 0):
+    if job.get("type") == "incremental_spec_plan":
+        ticket["caller_context"] = {rel: incremental.caller_context(target, rel) for rel in job["artifacts"]}
+    if job.get("type") == "reconcile_caller_info":
+        artifact = state.fm_dir(target) / "extracted_functions" / job["artifacts"][0]
+        ticket["before_sidecars"] = job.get("input", {}).get("before_sidecars", {
+            "spec": state.read_json(Path(f"{artifact}.spec.json"), None),
+            "info": state.read_json(Path(f"{artifact}.info.json"), None),
+        })
+    if job.get("type") in {"verify_function", "verify_batch"}:
+        ticket["loop_inventory"] = {
+            artifact: loop_evidence.inventory(state.fm_dir(target) / "extracted_functions" / artifact)
+            for artifact in job.get("artifacts", [])
+        }
+    if job.get("attempts", 0) > 1:
         ticket["validation_message"] = job.get("message") or "Previous receipt/artifact validation failed; return outputs exactly equal to required_outputs."
     path = state.control_dir(target) / "dispatches" / f"{job['id']}.json"
     state.atomic_json(path, ticket)
@@ -259,6 +309,8 @@ def _checked_ticket(target: Path, job_id: str) -> dict:
     definition = Path(ticket.get("worker_definition", ""))
     if not definition.is_file() or hashlib.sha256(definition.read_bytes()).hexdigest() != ticket.get("worker_definition_sha256"):
         raise ValueError("worker definition changed after the job was dispatched")
+    if ticket.get("developer_intent", "") != state.active_record(target).get("inputs", {}).get("config", {}).get("incremental_intent", ""):
+        raise ValueError("immutable developer intent changed after dispatch")
     if ticket.get("write_paths") != job.get("required_outputs"):
         raise ValueError("dispatch ticket output paths do not match the job manifest")
     return job
@@ -269,6 +321,27 @@ def submit(target: Path, job_id: str, receipt: dict) -> dict:
     if job.get("status") != "running":
         raise ValueError("only a dispatched running job can be submitted")
     ticket = state.read_json(state.control_dir(target) / "dispatches" / f"{job_id}.json", {})
+    if job["type"] in {"select_relevant_modules", "select_relevant_files", "incremental_spec_plan", "reconcile_caller_info"}:
+        if receipt.get("outputs") != job["required_outputs"]:
+            raise ValueError("incremental receipt must include exact required_outputs")
+        try:
+            payload = state.read_json(target / job["required_outputs"][0], {})
+            if job["type"] == "select_relevant_modules":
+                from job_planner import validate_modules
+                validate_modules(target, payload)
+            elif job["type"] == "select_relevant_files":
+                incremental.validate_selection(target, payload)
+                if set(payload["selected_function_ids"]) - set(job["input"]["eligible_function_ids"]):
+                    raise ValueError("file selection references a function outside selected modules")
+            elif job["type"] == "incremental_spec_plan":
+                incremental.validate_plan(target, payload, job["artifacts"])
+            else:
+                artifact = state.fm_dir(target) / "extracted_functions" / job["artifacts"][0]
+                if state.read_json(Path(f"{artifact}.spec.json"), None) != ticket["before_sidecars"]["spec"]:
+                    raise ValueError("caller reconciliation changed its read-only specification")
+        except (OSError, ValueError) as exc:
+            failed = scheduler.transition(target, job_id, "fail", None, str(exc), "output")
+            return {"action": "retry_required" if failed["status"] == "retryable" else "phase_failed", "job": failed}
     completed = scheduler.transition(
         target, job_id, "complete", receipt, None, "execution",
         ticket.get("attempt"), ticket.get("input_hash"), None,

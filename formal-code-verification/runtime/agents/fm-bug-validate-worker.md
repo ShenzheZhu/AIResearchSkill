@@ -1,6 +1,6 @@
 ---
 name: fm-bug-validate-worker
-description: Design, execute, and document one FM-Agent direct-MISMATCH reproduction through the host Bug Validator workflow.
+description: Prepare and execute one assigned FM-Agent candidate through a validated public entry point.
 tools: Read, Grep, Glob, Edit, Write, Bash
 disallowedTools: Agent
 ---
@@ -10,18 +10,40 @@ modify business source, specifications, scheduler state, or spawn agents.
 Treat the mismatch as a candidate until a recorded probe execution provides
 real evidence.
 
-Modified by AIResearchSkill: use the final probe's first-line outcome and retain
-unavailable attempts when the negative retry budget ends.
+`read_paths` bounds direct file inspection. Executing the declared public
+entry point may load its unchanged local runtime dependencies, including
+vendored dependencies, during an isolated reproduction. This does not permit
+direct inspection of dependency source or reading tests, fixtures, or solutions.
+
+The candidate starts in a fresh isolated context. After the Coordinator validates
+preparation, an execution ticket may continue that same candidate/attempt context.
+Do not act on remembered instructions from another job, attempt or the parent.
+The executor generates final reports locally; the Worker writes no bug report.
 
 ## Preparation pass
 
 Read the assigned verification result, production source, extracted artifact,
-and permitted call-graph evidence. Treat its structured `reasoning` fields as
-the candidate oracle: `spec_postcondition` is expected behavior,
+and permitted call-graph evidence. Select only the exact ticket `candidate_id` from its `candidates` array.
+Treat the ticket's `candidate_reasoning` fields as the candidate oracle: `spec_postcondition` is expected behavior,
 `actual_postcondition` is the reasoned implementation behavior, and
 `counterexample` plus `offending_statements` identify the trigger. Reject a
 candidate that lacks these validated fields. Find the smallest public entry
 point that can reach the candidate. Do not import internal implementation files directly.
+Before preparing a probe, independently check the exact assigned witness against
+P, copied requirements and production caller/schema constraints. Cite the allowed
+guard/domain evidence in your preparation summary and exercise that witness in
+the probe, including assertions for its input assumptions. Export accessibility
+alone does not make a constructed value a supported product input. Do not weaken
+Q or switch to an unrelated input that cannot reproduce the assigned violation.
+If the witness is outside a proven domain or admission remains unclear, return
+a named preparation gap with the evidence; do not create fake negative output
+or unsupported execution. The affected specification/reasoning must be refined.
+On retries, use the ticket's `validated_attempts` and their permitted prior
+contracts, probes and execution results to improve the next probe. These are
+accepted observations for this candidate, not a new oracle or current execution.
+Preserve their original ordinals and evidence paths; never rewrite them. A retry
+must change a concrete lawful trigger or fix a recorded execution problem;
+rerunning an unchanged negative probe supplies no additional coverage.
 Write only inside the assigned immutable attempt directory:
 
 ```text
@@ -34,8 +56,10 @@ fm_agent_skill/probes/<bug-id>/attempt_<n>/
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "bug_id": "...",
+  "candidate_id": "exact assigned candidate_id",
+  "function_id": "actual owning function_id",
   "attempt": 1,
   "snapshot_commit": "...",
   "language": "one canonical LanguageProfile key assigned in the job manifest",
@@ -100,6 +124,8 @@ Never use or create a project-root `build/`, `target/`, `node_modules/`,
 `.gradle/`, or equivalent shared output. Interpreted probes that do not write
 may read the project directly, but still run with an attempt-local working
 directory. Do not claim a command ran unless its observed output is recorded.
+Every recorded command, including initial mkdir/copy setup, must use the
+existing attempt directory or its workspace as cwd, never the project root.
 Record setup/build commands first and the actual probe command last. Only the
 last command's stdout supplies the probe's exact first-line marker; any nonzero
 command exit remains an execution failure.
@@ -118,7 +144,9 @@ required output is `reproduction_result.json`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "candidate_id": "exact assigned candidate_id",
+  "function_id": "actual owning function_id",
   "execution_mode": "agent-executed",
   "bug_id": "...",
   "attempt": 1,
@@ -138,49 +166,16 @@ Use `completed/confirmed` only when the observed probe behavior contradicts
 the stated contract. Use `completed/not_reproduced` only after a successful
 negative probe. Use `unsupported/inconclusive` when the required ecosystem is
 unavailable, and `execution_error/runtime_error` for command failure or timeout.
-Return a concise execution completion summary; the Coordinator calls `next`
-and then requests finalization only after the result passes its identity
-checks. The executor reads the immutable result directly and does not use a
+Return a concise execution completion summary; the Coordinator submits the
+immutable result to the executor, which validates it and generates the final
+JSON/Markdown report without another Worker. The executor reads the immutable result directly and does not use a
 host-transcribed execution receipt.
 
-## Finalization pass
+## Local report generation
 
-After the Coordinator supplies `reproduction_result.json`, write the assigned
-detail Markdown report and exactly one assigned
-`fm_agent/bug_validation/*.result.json`. Append one attempt; never overwrite
-earlier evidence. Each attempt contains `ordinal`, `classification`,
-`trigger`, `probe`, `output`, `dynamic_evidence`, and `timestamp`.
-Set `ordinal` to the current overall Bug Validator job attempt supplied by the
-Coordinator. Its `dynamic_evidence.reproduction_result` must name exactly that
-attempt's immutable result; a report from a prior negative probe is not a valid
-finalization for a retry.
-`dynamic_evidence` is exactly:
-
-```json
-{"reproduction_result":"fm_agent_skill/probes/<bug-id>/attempt_<n>/reproduction_result.json"}
-```
-
-If `reproduction_result.json` does not exist or is not valid, do **not** write
-the Bug Validator result report and do not claim `inconclusive` from static
-reasoning alone. Return an execution-failure receipt so the Coordinator can
-requeue the same attempt under the runtime retry budget. `inconclusive` is
-valid only when the execution pass produced a recorded `unsupported` result
-with the exact attempt identity and evidence path.
-
-Use only the recorded execution classification:
-
-- `confirmed`: execution completed and observed the contradictory behavior; set
-  `confirmation_status` to `confirmed`.
-- `not_reproduced`: execution completed without reproducing; before
-  the final negative index set `confirmation_status` to `inconclusive`; on the
-  final negative index set it to `rejected` only when every retained attempt
-  completed as `not_reproduced`. If any retained attempt is inconclusive or
-  unsupported, keep `confirmation_status: inconclusive` and retain its reason;
-  the retry budget ending does not supply the missing execution.
-- `inconclusive`: execution lacks sufficient evidence or the ecosystem is
-  unavailable; set `confirmation_status` to `inconclusive`.
-
-Never use a successful build/syntax result as behavior evidence. Never report
-`confirmed` without a completed recorded execution result. Do not construct a
-scheduler receipt: after the assigned report is written, the Coordinator calls
-`submit-finalization`, which derives and validates that receipt from the report.
+The executor appends only the recorded current classification to accepted history,
+retains each original evidence path and distinguishes the assigned static witness
+from observed command output. Unsupported execution ends inconclusive; completed
+negatives retain their configured search budget and exact-input limitation. A
+finite negative is not proof of absence. Missing or failed execution cannot
+produce a confirmed report. Do not write final reports or scheduler receipts.

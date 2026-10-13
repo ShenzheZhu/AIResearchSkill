@@ -19,10 +19,12 @@ does not authorize product fixes; apply none unless the user requests them.
 
 The Coordinator or a read-only scout may inspect existing tests to discover
 missing coverage. Do this before FM-Agent phase planning and keep it outside
-semantic Worker inputs. Launch semantic Workers with `fork_turns="none"`; supply only tickets, immutable definitions and permitted evidence. Never inherit the discovery parent's test/answer history. Immutable Spec, Verify, and Bug Workers never read
+semantic Worker inputs. Start semantic Workers with `fork_turns="none"`; supply only tickets, immutable definitions and permitted evidence. Spec and Verify always use independent fresh contexts. Only Bug execution may continue its matching isolated preparation Worker after validation, with the identical project/job/candidate/attempt/input hash; otherwise start fresh. Never reuse contexts across jobs or inherit the discovery parent's test/answer history. Immutable Spec, Verify, and Bug Workers never read
 project tests. Give them distilled requirements and caller intent with source
 citations, never test solutions, expected bug triggers, or known-bug answer keys.
 Keep their full definitions, tickets, allowed paths, and runtime gates unchanged.
+The runtime includes materialized copied requirements and permitted caller
+evidence in Verify and Bug preparation tickets.
 
 ## Four steps
 
@@ -50,9 +52,18 @@ Keep their full definitions, tickets, allowed paths, and runtime gates unchanged
    P needs a proven caller guard; reachable invalid inputs belong in Q's failure
    behavior. Let the unchanged FM-Agent Workers derive actual behavior and
    counterexamples, then validate candidates against actual code through the
-   runtime's existing Bug Validation execution. After a real reproduction,
+   runtime's existing Bug Validation execution. Establish that the actual witness
+   satisfies P and the governing input domain before probing. An invalid or
+   unclear domain is a named gap; never invent negative output, substitute an
+   unrelated witness, or weaken Q. Valid unsupported evidence finishes
+   inconclusive on its first attempt. Runtime and completed-negative budgets
+   remain, but retries need a distinct lawful witness/trigger or a fix for the
+   actual execution error. After a real reproduction,
    correct mistaken model assumptions, revisit affected callers/flows, and
-   rerun the relevant existing stages. Preserve the governing requirement and
+   rerun the relevant existing stages. After a completed baseline, use incremental
+   selection with both the source differences and the developer's goal; include
+   necessary consumers the patch omitted. Reuse qualified unchanged evidence at
+   its original origin instead of repeating unrelated batches. Preserve the governing requirement and
    prior evidence; do not repair a violated Q by redefining intended behavior.
 4. **Account for coverage.** Maintain the ledger below as evidence arrives.
    Deduplicate by business obligation, observable path, and failure mode: several
@@ -102,10 +113,14 @@ Record the ledger before finalization. Its minimal schema is:
 
 Evidence entries name a project-relative `path` and a `level`: `reasoning`,
 `actual-code`, `integration`, or `machine-verifier`. A passed/failed native
-Bug Validation row also names its assigned `function_id`; its `requirement`
+Bug Validation row also names its assigned `function_id` and independent
+`candidate_id`; its `requirement`
 must exactly equal that function's independently derived `.spec.json`
 `post_condition`. The current source index, planned job, accepted receipt and
-named execution attempt must all belong to that assignment and snapshot.
+named execution attempt must all belong to that assignment. New evidence belongs
+to the active snapshot; retained evidence must have a qualified original snapshot
+and exact original receipt, execution files and result bytes. Never relabel an
+old execution as one performed against the new snapshot.
 Reusing a budget-check probe for a persistence postcondition is invalid even
 when both are part of the same flow. Native Bug Validation receipts qualify
 only `actual-code`: calling one `integration` or `machine-verifier` does not
@@ -114,6 +129,8 @@ independently validate the relevant evidence type; do not invent an adapter.
 `confirmed` supports the assigned failed obligation. A successful negative
 probe supports only that exact postcondition for its recorded inputs and
 schedule, which must be stated in `limitation`; it never passes the whole flow.
+Each independently derived candidate needs its own validation. Multiple probes
+for one candidate are attempts, not additional defects or broader coverage.
 Unsupported, inconclusive, raw build logs and other unvalidated records keep
 the obligation unknown. Unknown rows remain visible without a function
 binding and may link reasoning or external-tool artifacts. After execution,

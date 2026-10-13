@@ -10,9 +10,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
+from result_fixture import verification_result
 
 from fm_agent_core import state
 import bug_validation_executor
+import semantic_executor
 import scheduler
 
 
@@ -39,34 +41,31 @@ class BugWorkerTicketTest(unittest.TestCase):
             artifact = state.fm_dir(target) / "extracted_functions" / entry["artifact"]
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text((target / entry["path"]).read_text(), encoding="utf-8")
-            state.atomic_json(Path(f"{artifact}.spec.json"), {"pre_condition": "value is an integer", "post_condition": "returns value + 2"})
+            state.atomic_json(Path(f"{artifact}.spec.json"), {"signature": entry["id"], "pre_condition": "value is an integer", "post_condition": "returns value + 2"})
             state.atomic_json(Path(f"{artifact}.info.json"), {"callees": []})
         state.atomic_json(state.control_dir(target) / "graph_edges.json", {
             "edges": [{"caller_artifact": "caller-call-1.py", "callee_artifact": "calc-inc-1.py"}],
         })
-        state.atomic_json(state.fm_dir(target) / "logic_verification_results/calc-inc-1.json", {
-            "schema_version": 2, "function_id": "calc.py::inc", "snapshot_commit": "unversioned", "verdict": "MISMATCH",
-            "reasoning": {"actual_postcondition": "returns value + 1", "spec_postcondition": "returns value + 2",
-                          "counterexample": "value=0 returns 1 instead of 2", "offending_statements": "return value + 1"},
-        })
+        state.atomic_json(state.fm_dir(target) / "logic_verification_results/calc-inc-1.json", verification_result(function_id="calc.py::inc", snapshot_commit="unversioned", verdict="MISMATCH", reasoning={"actual_postcondition": "returns value + 1", "spec_postcondition": "returns value + 2",
+                          "counterexample": "value=0 returns 1 instead of 2", "offending_statements": "return value + 1", "reason": "The return differs from the required value"}))
         job = scheduler.create(target, {
             "id": "bug-validation-candidate", "type": "bug_validate", "phase": "bug_validation",
             "depends_on": [], "artifacts": [], "required_outputs": ["fm_agent/bug_validation/candidate.result.json"],
-            "input": {"bug_id": "candidate", "function_id": "calc.py::inc", "mode": "full"},
+            "input": {"candidate_id": state.candidate_id("calc.py::inc"), "bug_id": "candidate", "function_id": "calc.py::inc", "mode": "full"},
         })
         return scheduler.transition(target, job["id"], "start", None, None, "execution")
 
     def execution(self, target: Path) -> Path:
         root = bug_validation_executor.attempt_dir(target, "candidate", 1)
         entry = {"ecosystem": "host-project-toolchain", "kind": "module", "target": "calc.py", "symbol": "inc"}
-        state.atomic_json(root / "reproduction.json", {
-            "schema_version": 2, "bug_id": "candidate", "attempt": 1, "snapshot_commit": "unversioned",
+        state.atomic_json(root / "reproduction.json", {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"),
+            "schema_version": 3, "bug_id": "candidate", "attempt": 1, "snapshot_commit": "unversioned",
             "language": "python", "public_entrypoint": entry, "probe_file": "probe.py", "timeout_seconds": 30,
             "expected_marker": "CONFIRMED", "not_confirmed_marker": "NOT CONFIRMED",
         })
         (root / "probe.py").write_text('print("CONFIRMED")\n', encoding="utf-8")
-        state.atomic_json(root / "reproduction_result.json", {
-            "schema_version": 1, "execution_mode": "agent-executed", "bug_id": "candidate", "attempt": 1,
+        state.atomic_json(root / "reproduction_result.json", {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"),
+            "schema_version": 2, "execution_mode": "agent-executed", "bug_id": "candidate", "attempt": 1,
             "snapshot_commit": "unversioned", "language": "python", "public_entrypoint": entry,
             "state": "completed", "classification": "confirmed", "reason": "The recorded probe contradicted the contract",
             "commands": [{"command": "python3 probe.py", "cwd": root.relative_to(target).as_posix(), "returncode": 0,
@@ -74,7 +73,7 @@ class BugWorkerTicketTest(unittest.TestCase):
         })
         return root
 
-    def test_each_pass_persists_complete_fresh_worker_ticket(self) -> None:
+    def test_validated_execution_can_continue_its_isolated_candidate_context(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary).resolve()
             job = self.prepare(target)
@@ -91,12 +90,13 @@ class BugWorkerTicketTest(unittest.TestCase):
             self.assertEqual(execution["public_entrypoint"]["target"], "calc.py")
             self.assertIn(root.relative_to(target).as_posix() + "/workspace/", execution["write_paths"])
             self.assertNotIn("fm_agent/logic_verification_results/calc-inc-1.json", execution["read_paths"])
-            finalization = bug_validation_executor.worker_request(target, job, "finalization", "codex")
-            self.assertEqual(finalization["required_outputs"], job["required_outputs"])
-            self.assertEqual(finalization["write_paths"], ["fm_agent/bug_validation/candidate.result.json", "fm_agent/bug_validation/candidate.md"])
-            self.assertIn((root / "reproduction_result.json").relative_to(target).as_posix(), finalization["read_paths"])
-            self.assertNotIn("calc.py", finalization["read_paths"])
-            for ticket in (preparation, execution, finalization):
+            self.assertNotIn("candidate_continuation", preparation["host_invocation"])
+            self.assertEqual(execution["host_invocation"]["native_followup_tool"], "collaboration.followup_task")
+            self.assertEqual(execution["host_invocation"]["candidate_continuation"], {
+                "project": str(target), "job_id": job["id"], "attempt": 1,
+                "candidate_id": job["input"]["candidate_id"], "input_hash": job["input_hash"],
+            })
+            for ticket in (preparation, execution):
                 persisted = state.read_json(target / ticket["ticket_path"], {})
                 self.assertEqual(persisted, {key: value for key, value in ticket.items() if key != "ticket_path"})
                 self.assertEqual(ticket["project"], str(target))
@@ -119,8 +119,29 @@ class BugWorkerTicketTest(unittest.TestCase):
                 bug_validation_executor.worker_request(target, job, "preparation", "codex")
             root = self.execution(target)
             (root / "reproduction_result.json").unlink()
-            with self.assertRaisesRegex(ValueError, "recorded execution result"):
-                bug_validation_executor.worker_request(target, job, "finalization", "codex")
+            with self.assertRaisesRegex(ValueError, "outcome evidence"):
+                bug_validation_executor.submit_agent_execution(target, job["id"])
+
+    def test_caller_and_normative_constraints_reach_verification_and_preparation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary).resolve(); job = self.prepare(target)
+            domain = state.fm_dir(target) / "spec_prompts/domain_context"
+            copied = "fm_agent/spec_prompts/domain_context/user_knowledge/requirements.md"
+            state.atomic_json(domain / "user_knowledge/manifest.json", {"entries": [{"copied_path": copied}]})
+            (target / copied).write_text("Public API accepts only integers 0 through 9; the caller checks this domain.\n")
+            (domain / "phase_1_types.txt").write_text("Counter input is a bounded integer.\n")
+            (domain / "engine_overview.txt").write_text("Caller validates the public counter API.\n")
+            verify = {"id": "verify-calc", "type": "verify_function", "phase": "verification",
+                      "artifacts": ["calc-inc-1.py"], "attempts": 1, "input": {},
+                      "required_outputs": ["fm_agent/logic_verification_results/calc-inc-1.json"]}
+            tickets = [semantic_executor._ticket(target, verify, "codex"),
+                       bug_validation_executor.worker_request(target, job, "preparation", "codex")]
+            for ticket in tickets:
+                for path in (copied, "fm_agent/spec_prompts/domain_context/phase_1_types.txt",
+                             "fm_agent/extracted_functions/caller-call-1.py"):
+                    self.assertIn(path, ticket["read_paths"])
+                self.assertNotIn("tests/test_calc.py", ticket["read_paths"])
+                self.assertNotIn("docs/answers.md", ticket["read_paths"])
 
     def test_preparation_can_discover_public_exports_from_neutral_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

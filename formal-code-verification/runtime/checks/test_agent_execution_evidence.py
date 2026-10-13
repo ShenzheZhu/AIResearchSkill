@@ -23,21 +23,21 @@ class AgentExecutionEvidenceTest(unittest.TestCase):
             target = Path(temporary)
             root = target / "fm_agent_skill/probes/candidate/attempt_001"
             entrypoint = {"ecosystem": "host-project-toolchain", "kind": "module", "target": "calc.py", "symbol": "inc"}
-            state.atomic_json(root / "reproduction.json", {
-                "schema_version": 2, "bug_id": "candidate", "attempt": 1,
+            state.atomic_json(root / "reproduction.json", {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"),
+                "schema_version": 3, "bug_id": "candidate", "attempt": 1,
                 "snapshot_commit": "snapshot", "language": "python", "public_entrypoint": entrypoint,
                 "probe_file": "probe.py", "expected_marker": "CONFIRMED",
                 "not_confirmed_marker": "NOT CONFIRMED", "timeout_seconds": 30,
             })
             (root / "probe.py").write_text('print("CONFIRMED")\n', encoding="utf-8")
-            state.atomic_json(root / "reproduction_result.json", {
-                "schema_version": 1, "execution_mode": "agent-executed", "bug_id": "candidate",
+            state.atomic_json(root / "reproduction_result.json", {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"),
+                "schema_version": 2, "execution_mode": "agent-executed", "bug_id": "candidate",
                 "attempt": 1, "snapshot_commit": "snapshot", "language": "python",
                 "public_entrypoint": entrypoint, "state": result_state, "classification": classification,
                 "reason": "Recorded execution outcome",
                 "commands": [dict(item, cwd=root.relative_to(target).as_posix(), stderr="") for item in commands],
             })
-            job = {"attempts": 1, "input": {"bug_id": "candidate", "mode": "full"}}
+            job = {"attempts": 1, "input": {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"), "bug_id": "candidate", "mode": "full"}}
             return bug_validation_executor.agent_execution_result_valid(target, job)
 
     def command(self, output: str, returncode: int = 0, command: str = "python3 probe.py") -> dict:

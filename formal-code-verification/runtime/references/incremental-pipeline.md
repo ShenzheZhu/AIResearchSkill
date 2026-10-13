@@ -1,42 +1,91 @@
 # Incremental pipeline
 
-Dispatch enters this pipeline only with a valid compatible full baseline and an
-automatically written intent. Every selection must be recorded in
-`fm_agent_skill/control/incremental_decision.json` with a reason: `diff`, `intent`,
-`caller-propagation`, `callee-propagation`, or `spec-change`.
+Enter only with a compatible completed baseline and changed supported source or
+a new captured developer goal. `--incremental INTENT.md` supplies a non-empty
+Markdown goal; `--note` adds a note. A goal-only run can discover necessary work
+omitted from unchanged functions. The captured ticket `developer_intent` is
+normative and overrides the older knowledge clauses it changes. Generated
+context and Git summaries remain observational.
 
-1. `validate_baseline`: confirm the baseline Git ref, index, specs, and verification artifacts.
-2. `refresh_plan`: dispatch `fm-agent-skill:fm-phase-plan-worker` (and `fm-agent-skill:fm-domain-context-worker` when context changes) for the chosen scope, then run `executor.py normalize-phases --project "$PROJECT"` before its gate.
-3. `preserve_specs`: run `executor.py preserve-specs --project "$PROJECT"` before re-extraction to snapshot compatible paired sidecars in Skill control state.
-4. `diff`: when CodeGraph is selected, export first and run `executor.py extract --project "$PROJECT" --codegraph-export "$PROJECT/fm_agent_skill/control/codegraph_export.json"`; otherwise omit that option. Then run `executor.py diff --project "$PROJECT"`. It compares the baseline commit with the current snapshot commit through Git: any changed file includes every current function from that file, even when a function body is unchanged. It removes verification results for that whole conservative range and for removed functions; only unaffected files retain their sidecars and results.
-5. `rebuild_graph`: when CodeGraph is selected, reuse `codegraph.py export --output "$PROJECT/fm_agent_skill/control/codegraph_export.json"` from extraction (or create it immediately before extraction) and run `executor.py graph --project "$PROJECT" --codegraph-export "$PROJECT/fm_agent_skill/control/codegraph_export.json"`. Otherwise dispatch `fm-agent-skill:fm-agent-static-edge-worker`, promote its candidate with `executor.py record-agent-edges`, then run `executor.py graph`; its validated edges seed automatic caller/callee propagation.
-6. `select_scope`: run `executor.py select --project "$PROJECT"` for the deterministic changed-function seed. Then use `fm-agent-skill:fm-select-relevant-modules-worker` and `fm-agent-skill:fm-select-relevant-files-worker` to add caller/callee propagation. After validating each file-selector record, merge it with `incremental.py merge-selection --record <record> --reason caller-propagation` (or its actual propagation reason); the control decision records why every indexed function is included or excluded.
-7. `update_specs`: run `executor.py restore-specs --project "$PROJECT"` to recover only unchanged paired sidecars. Dispatch read-only `fm-agent-skill:fm-incremental-spec-plan-worker` jobs for selected independent functions; persist each accepted response and call `incremental.py apply-plan --plan <plan>` serially. Then dispatch one `fm-agent-skill:fm-reconcile-caller-info-worker` per caller frontier. The apply tool writes native `fm_agent/incremental_updated_specs.json`.
-8. `verify_affected`: dispatch `fm-agent-skill:fm-verify-function-worker` jobs for selected functions. Each job repeats the structured actual-postcondition A versus specification B check for the current snapshot; use `DEPENDENCY_RISK` rather than converting a callee's direct mismatch into a caller mismatch. Retained schema-v1 or otherwise malformed verification results invalidate the baseline instead of becoming Bug Validator candidates.
-9. `bug_validation`: plan and dispatch `fm-agent-skill:fm-bug-validate-worker`
-   for every selected direct `MISMATCH` candidate. The worker first designs a
-   public-entrypoint probe; the Coordinator records
-   optional build evidence with `probe_runner.py`, executes the reviewed probe
-   with `reproduction_runner.py`, then asks the worker to finalize its result.
-   Only the latter dynamic result can confirm or reject a candidate. Overwrite
-   the current `fm_agent/bug_validation/summary.json`; incremental cleanup
-   removes older reports and probes before this phase.
-10. `finalize`: gate all retained and selected artifacts, then save the new
-    baseline. Reports every dynamically validated candidate as confirmed,
-    rejected, or inconclusive.
+Drive every phase through `phase_driver.py next/execute`, using the returned
+analysis checkout. The driver owns deterministic actions and planning; the host
+claims and starts returned native Workers with `fork_turns="none"` and submits
+their exact receipts. Spec and Verify have independent fresh contexts. Only a
+Bug execution ticket may continue its matching isolated preparation Worker
+after validation, for the same project/job/candidate/attempt/input hash; otherwise
+start fresh. Do not manufacture selector or contract-update jobs.
 
-Deleted functions must be absent from the Skill control analysis index, extracted artifacts,
-required result mapping, and retained-spec mapping. A stale or malformed
-artifact makes the gate fail rather than being treated as valid reuse.
+1. `validate_baseline`: `executor.py validate-baseline` checks the original
+   inventory, specifications, results, accepted candidate evidence, Git ref and
+   pure configuration fingerprint. It writes the snapshot-bound
+   `control/baseline_validation.json` receipt before later phases replace that
+   inventory. Resume validates this sealed receipt and exact baseline record.
+2. `refresh_plan`: the Phase Plan Worker refreshes the scoped source/module
+   plan. Normalization and its gate retain `modules[].source_files` and phase
+   dependencies. Incremental cleanup removes transient selectors, decisions,
+   phase receipts and update records; it preserves original jobs, accepted
+   receipts, reports, private probes and their originating run identities.
+3. `preserve_specs`: capture the complete old inventory, graph and native pairs.
+   `retained_evidence.json` records unchanged-file proof bytes, source blobs,
+   exact spec/info and accepted Bug Validation origins. Reused evidence keeps
+   its original verification/execution snapshot, including recursive reuse.
+4. `diff`: freshly extract the requested scope, then compare against the saved
+   inventory. Every current function in a changed file is invalidated, even
+   when its body bytes are unchanged: imports, constants, types and global state
+   can alter its behavior. Deleted functions lose results and cannot be reused.
+   This is a conservative file boundary, not exact body-only minimum selection.
+5. `rebuild_graph`: rebuild current top-down layers. With CodeGraph, use the same
+   validated export for extraction and graph construction. Otherwise a fresh
+   static-edge Worker emits the candidate; promote validated edges and retain
+   the `agent-static/best-effort` precision label.
+6. `select_scope`: seed changed-file/new functions and callers of deleted
+   callees. A module Worker considers every assigned module against the goal;
+   the file/function Worker narrows selected modules and identifies relevant
+   unchanged contracts. Their selected/excluded arrays account for every
+   assigned ID. Accepted selections add **review** work; they do not immediately
+   invalidate unchanged proofs. `selection_complete` seals the exact current
+   included/excluded verification partition.
+7. `update_specs`: restore existing native pairs as review inputs, materialize
+   immutable knowledge and regenerate observational domain context. Read-only
+   specification Workers review caller-first frontiers and write only assigned
+   `worker_reports/<job-id>.json` plans. The planner serially applies accepted
+   plans, compares actual spec/info changes, and retains applicable unchanged
+   pairs exactly. Changed caller expectations enqueue their direct callees;
+   changed callee contracts invalidate and reconcile their direct callers.
+   Reconciliation owns one caller info file and keeps its original before-pair
+   across retries. A stale caller context is reviewed again before convergence.
+   Stable contracts stop propagation; do not expand to the entire connected
+   graph. `incremental_updated_specs.json` records changed/reviewed artifacts
+   and `update_complete` only when all frontiers have settled.
+8. `verify_affected`: only after `update_complete`, plan and dispatch current
+   verification for changed-file, spec, info or callee-contract affected IDs.
+   Never pre-plan or stream verification while any contract/reconciliation can
+   still mutate its inputs. Applicable unchanged qualified proofs retain their
+   original snapshot. Use `DEPENDENCY_RISK` for a callee-only risk, never invent
+   a caller's direct mismatch. Every conclusive result uses schema 3, complete
+   A→B reasoning, candidate identities and required loop obligations.
+9. `bug_validation`: create one run-qualified job and private probe directory
+   per selected direct candidate ID, with both `candidate_id` and actual
+   `function_id` in its input. Follow the executor's preparation and execution
+   actions; it generates reports and receipts locally from validated immutable
+   evidence and accepted history. Valid unsupported evidence ends inconclusive
+   on its first attempt; existing runtime and completed-negative budgets remain.
+   Only accepted real probe evidence confirms/rejects a
+   candidate. Preserve unrelated original evidence; the current summary counts
+   qualified current and retained candidate outcomes without double counting.
+10. `finalize`: validate all current/reused function artifacts and every accepted
+    direct candidate, then save the completed baseline. Store pure configuration
+    compatibility separately from the exact evidence-producing run fingerprint.
 
-Read [agent-orchestration.md](agent-orchestration.md) for the host-agent and
-CodeGraph backend model.
+Explicit CLI selection/plan application accepts only the assigned output of a
+succeeded current Worker; resolve receipt paths relative to `--project`.
+The phase driver performs these applications automatically. Do not rewrite old
+result snapshots, receipts or probes to make retained evidence look current.
 
 ## Resume
 
-Read [resume-contract.md](resume-contract.md) for an explicit resume. Re-enter
-only the first incomplete incremental phase. Do not recalculate a completed
-diff, selection decision, or preserved-spec snapshot unless its normal gate no
-longer validates, in which case resume must fail rather than silently widening
-scope. Reuse only function artifacts whose ids belong to the interrupted
-snapshot commit.
+Continue the same snapshot, goal and reasoning mode at the first incomplete
+phase. Do not recompute completed diff/selection/preservation records or widen
+scope. Omitted `--all-bugs` inherits the run's saved value; an explicit contrary
+`--all-bugs` or `--no-all-bugs` is rejected. Failed gates remain incomplete.
+Read [resume-contract.md](resume-contract.md) for recovery and lock ownership.

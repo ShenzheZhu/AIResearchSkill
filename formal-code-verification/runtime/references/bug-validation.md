@@ -1,6 +1,6 @@
 # Bug validation
 
-A schema-v2 direct reasoning `MISMATCH` is a candidate only after the gate has
+A schema-v3 direct reasoning `MISMATCH` is a candidate only after the gate has
 validated normative or inferred specification B, reasoned actual postcondition A, a
 concrete `A ∧ ¬B` counterexample, and an exact offending source quote. It is
 never a confirmed defect. Do not
@@ -75,7 +75,8 @@ reproduction.
 
 ## Fast agent-executed reproduction
 
-For each candidate and attempt:
+For each independent `candidate_id` and attempt (keeping its actual owning
+`function_id` separate):
 
 1. Obtain a candidate descriptor through `durable_executor.py next`, claim it
    immediately with `durable_executor.py claim`,
@@ -84,37 +85,60 @@ For each candidate and attempt:
    assigned `fm_agent_skill/probes/<bug-id>/attempt_<n>/` directory. Do not
    call `bug_validation_executor.py start` again: the durable executor already
    owns the atomic scheduler start transition.
-2. Validate that the contract names the current snapshot, a structured public
+2. Validate that the schema-3 contract names its candidate, actual function,
+   attempt and current snapshot, a structured public
    entry point (`ecosystem`, `kind`, repository-relative `target`, `symbol`),
    a fixed language extension, no shell command, and fixed `CONFIRMED` /
    `NOT CONFIRMED` markers. In `agent-executed` mode every profile uses the
    registry's `host-project-toolchain` ecosystem; in `adapter` mode, it must
    equal the profile's `dynamic_adapter`. The default
-   `bug_validation_execution: agent-executed` requests the same Worker in an
-   execution pass. It uses the repository's real toolchain and build system,
+   `bug_validation_execution: agent-executed` returns an execution ticket.
+   After preparation validation, use its `candidate_continuation` metadata and
+   `collaboration.followup_task` only for the same preparation Worker that
+   started with `fork_turns="none"` and has handled only this exact
+   project/job/candidate/attempt/input hash. Pass the complete execution ticket
+   and immutable definition. If the matching isolated context or followup tool
+   is unavailable, launch a fresh execution Worker. Never reuse another job,
+   candidate or attempt, or a context that received parent history, tests,
+   answers or unrelated messages. It uses the repository's real toolchain and
+   build system,
    records every command, exit code and bounded output in
    `reproduction_result.json`, and may support any FM-Agent language. Up to
    `bug_validation_concurrency` candidate probes (four by default) may execute
-   together. Once immutable execution evidence is accepted, the candidate
-   releases that primary slot. Its finalize Worker instead uses the separate
-   `bug_validation_finalize_concurrency` pool (two by default), so receipt
-   work never prevents the next candidate probe from starting;
-   every recorded command must use a working directory below that attempt, and
+   together. Report and receipt generation is local deterministic work and
+   consumes no Worker slot. Every recorded command must use a working directory
+   below that attempt, and
    any build workspace or cache must be private to it.
 3. Submit that immutable execution evidence to the executor. If it records
    `execution_error`, the executor requeues the same job; do not write a
    semantic result.
-4. Otherwise invoke the same worker in its finalization pass with the immutable
-   `reproduction_result.json`, then call `bug_validation_executor.py
-   submit-finalization`. It derives the scheduler classification and required
-   outputs from the validated final report; the Coordinator must not transcribe
-   those fields manually.
+4. Otherwise the executor validates the immutable execution result and accepted
+   history, writes the candidate report, and submits its canonical scheduler
+   receipt locally. The Coordinator must not invent report fields or transcribe
+   classifications. Valid `unsupported/inconclusive` evidence ends the job on
+   that first accepted attempt.
 
 The final report's last `attempts[]` item must have `ordinal` equal to the
 current overall job attempt and must point at that exact attempt's
 `reproduction_result.json`. A prior negative report never completes a retried
-probe; the host state machine requests finalization again until the current
-dynamic evidence is appended.
+probe; the runtime appends only validated current dynamic evidence. Preserve the
+exact ordered prefix of accepted
+semantic attempts; duplicates, reordering or a dropped inconclusive attempt
+cannot exhaust the negative budget. Each accepted negative outcome seals its
+probe/contract/execution/build records through the same SQLite artifact identity
+as terminal acceptance. Runtime failures may leave ordinal gaps.
+
+The expected lifecycle is two model turns per attempt (preparation and
+execution), down from three. Safe continuation reduces native context starts
+from three to one; a fresh execution Worker uses two. These counts do not
+establish measured wall-clock savings or completion of a repository audit.
+
+Preparation receives manifest-bound copied requirements and permitted caller
+evidence alongside the candidate. Establish that the witness satisfies P and
+the governing input domain before probing. An invalid or unclear domain is a
+named inconclusive gap; do not invent `NOT CONFIRMED` output, substitute an
+unrelated input, or weaken Q to fit the implementation. A successful negative
+probe supports only its actual input and schedule, never the entire domain.
 
 `agent-executed` is FM-Agent-compatible quick mode, not a sandbox guarantee.
 The Worker may execute project-scoped commands for any registered language,
@@ -144,19 +168,18 @@ resume later. It is not evidence of an unsupported project or a probe failure.
 The dynamic lifecycle is driven by `bug_validation_executor.py`, not a manual
 sequence of ad-hoc runner calls. It never invokes an Agent itself. Instead it
 returns an exact `host_worker` request for the active Codex/Claude Coordinator
-at the preparation, execution, and finalization boundaries. The Coordinator must invoke the
+at the preparation and execution boundaries. The Coordinator must invoke the
 named Worker through its native subagent mechanism, then return its compact
 receipt to the state machine. The state machine owns admission, contract
-validation, execution evidence, retry/requeue, receipt
+validation, execution evidence, deterministic reports, retry/requeue, receipt
 validation, and the terminal summary.
 
 For each job, the Coordinator must process exactly one returned action at a
 time. Independent admitted Bug Validator jobs may progress concurrently. After
-a preparation or execution Worker receipt, call `next`; adapter mode alone uses
-`run-dynamic`; after a finalization receipt, call `submit-finalization`. A
-`wait_for_finalization_capacity` response is non-terminal: continue filling
-primary candidate slots and retry that finalization request after another
-completion. Never infer completion from a
+preparation receipt, call `next`; after an execution receipt, call
+`submit-agent-execution`; adapter mode alone uses `run-dynamic`. Continue
+processing the returned action until the accepted job is terminal. Never infer
+completion from a
 report path and never launch the next Worker for that job before the executor
 returns its request.
 
@@ -167,32 +190,42 @@ code, stdout, stderr, source snapshot, and classification.
 
 ## Classification and retry
 
-| Dynamic runner result | Worker receipt | Final report status |
+A named witness/domain preparation gap is a semantic failure, not an execution
+attempt. Record it with `scheduler.py fail --failure-class semantic --message`
+and its evidence; keep the coverage row unverified. Refine the governing
+specification/reasoning before replanning that candidate. Do not repeatedly
+redispatch the unchanged preparation or manufacture an execution result.
+
+| Validated execution result | Canonical receipt | Final report status |
 | --- | --- | --- |
 | completed `CONFIRMED` | `confirmed` | `confirmed`; stop |
 | completed `NOT CONFIRMED` | `not_reproduced` | `inconclusive` until the last negative attempt, then `rejected` |
-| completed unsupported/ambiguous output | `inconclusive` | `inconclusive` |
+| valid `unsupported` evidence | `inconclusive` | `inconclusive`; stop after the first accepted attempt |
+| completed ambiguous output | `inconclusive` | `inconclusive`; completed-negative budget applies |
 | timeout, command/tool failure, missing result | no receipt | retryable runtime failure |
 
 Runtime failure retries up to `bug_validation_max_attempts` (default five).
-A completed `not_reproduced` or `inconclusive` attempt repeats under the same
-job ID until `bug_validation_negative_retries + 1` attempts (default three),
-preserving every immutable attempt. Vary only legal inputs or trigger conditions;
-keep the candidate identity and source snapshot fixed. A build failure is runtime
+A completed `not_reproduced` or ambiguous `inconclusive` attempt repeats under
+the same job ID until `bug_validation_negative_retries + 1` attempts (default three),
+preserving every immutable attempt. Valid unsupported execution does not repeat.
+For a retry, use a distinct lawful witness/trigger within the assigned candidate
+claim or fix the actual execution error; an identical unavailable-runtime probe
+adds no evidence. Keep candidate identity and source snapshot fixed. An exact-input
+claim cannot become a broader claim by varying the probe. A build failure is runtime
 probe evidence only; it cannot reject or confirm a semantic candidate.
 
-On-demand `--validate FUNCTION_ID` preserves accepted reports and private probe
-evidence for other direct MISMATCH candidates on the same compatible baseline.
-It replaces only the selected function's report and probe tree, then rewrites
-the current `summary.json` over all valid retained reports. A full or
-incremental analysis still clears Bug Validation artifacts before creating its
-new current baseline.
+On-demand `--validate` identifies one candidate (a function ID is sufficient
+only when it resolves to one candidate). It preserves other accepted candidate
+reports and private probe evidence on the compatible baseline. A new probe uses
+its own run-qualified job/report/attempt paths; it cannot overwrite an older
+accepted candidate's authority.
 
-For incremental analysis, consider only direct `MISMATCH` results whose
-`function_id` is in `incremental_decision.json.included`. Replace the current
-Coordinator-authored `summary.json` with the current snapshot commit and exact
-candidate/confirmed/rejected/inconclusive counts; never reuse older reports or
-probes as current confirmation:
+Incremental planning validates newly affected direct candidates. The summary
+also resolves unchanged candidates through their explicit retained origins and
+original accepted receipts. Never relabel their old snapshots or claim they
+were executed again. Historical reports not selected by a current candidate's
+accepted job path are ignored. Replacing the current summary does not erase
+historical probes or accepted receipts:
 
 ```bash
 <python3> "$FM_AGENT_SKILL_ROOT/scripts/bug_summary.py" \

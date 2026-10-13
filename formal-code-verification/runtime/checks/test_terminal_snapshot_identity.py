@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
+from result_fixture import verification_result
 
 from fm_agent_core import state
 import checkpoint
@@ -32,13 +33,9 @@ class TerminalSnapshotIdentityTest(unittest.TestCase):
             state.atomic_json(state.control_dir(target) / "analysis_index.json", {
                 "functions": [{"id": "calc.py::inc", "artifact": artifact.name}],
             })
-            result = {
-                "schema_version": 2, "function_id": "calc.py::inc", "snapshot_commit": "saved-snapshot",
-                "verdict": "MISMATCH", "gaps": None, "error": None,
-                "reasoning": {"actual_postcondition": "returns x + 1", "spec_postcondition": "returns x + 2",
+            result = verification_result(function_id="calc.py::inc", snapshot_commit="saved-snapshot", verdict="MISMATCH", gaps=None, error=None, reasoning={"actual_postcondition": "returns x + 1", "spec_postcondition": "returns x + 2",
                               "counterexample": "x=0 returns 1 instead of 2", "offending_statements": "return x + 1",
-                              "reason": "The return value is one below the contract"},
-            }
+                              "reason": "The return value is one below the contract"})
             result_path = state.fm_dir(target) / "logic_verification_results/calc-inc-1.json"
             state.atomic_json(result_path, result)
             with patch.object(state, "current_snapshot_commit", return_value="saved-snapshot"):
@@ -51,7 +48,7 @@ class TerminalSnapshotIdentityTest(unittest.TestCase):
                 self.assertEqual(report["counts"]["verification_results"], 1)
                 self.assertEqual(report["counts"]["candidates"], 1)
                 self.assertEqual(report["counts"]["confirmed"], 1)
-                self.assertEqual(report["findings"]["candidates"], ["calc.py::inc"])
+                self.assertEqual(report["findings"]["candidates"], [state.candidate_id("calc.py::inc")])
 
                 result["snapshot_commit"] = "new-live-head"
                 state.atomic_json(result_path, result)

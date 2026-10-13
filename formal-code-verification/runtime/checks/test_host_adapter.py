@@ -77,6 +77,18 @@ class HostAdapterContractTest(unittest.TestCase):
         self.assertEqual(contract["kind"], "registered_worker")
         self.assertEqual(contract["name"], "fm-agent-skill:fm-spec-batch-worker")
 
+    def test_continuation_is_candidate_bound_and_fresh_launch_remains_available(self) -> None:
+        identity = {"project": "/isolated/counters", "job_id": "bug-count", "attempt": 1,
+                    "candidate_id": "counter.py::total::bug-001", "input_hash": "current-input"}
+        action = worker_contracts.invocation("fm-agent-skill:fm-bug-validate-worker", "codex",
+                                           candidate_continuation=identity)
+        self.assertEqual(action["candidate_continuation"], identity)
+        self.assertEqual(action["native_followup_tool"], "collaboration.followup_task")
+        self.assertEqual(action["native_launch_arguments"], {"fork_turns": "none"})
+        with self.assertRaises(ValueError):
+            worker_contracts.invocation("fm-agent-skill:fm-verify-function-worker", "codex",
+                                        candidate_continuation=identity)
+
     def test_coordinator_is_the_host_parent_not_a_worker(self) -> None:
         contract = coordinator_contract.invocation("codex")
         self.assertEqual(contract["kind"], "native_parent_agent")

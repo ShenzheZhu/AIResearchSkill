@@ -21,29 +21,29 @@ class MixedValidationGateTest(unittest.TestCase):
         with patch.object(state, "snapshot_sources_clean", return_value=True):
             return stage_gate.validate(target, "full", "bug_validation", [])
 
-    def test_retained_unavailable_attempt_then_final_negative_passes_as_inconclusive(self):
+    def test_retained_inconclusive_attempt_then_final_negative_passes_as_inconclusive(self):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary).resolve()
-            job = write_accepted_candidate(target, status="inconclusive", prior_unsupported=True)
+            job = write_accepted_candidate(target, status="inconclusive", prior_inconclusive=True)
             accepted = scheduler.accepted_job(
                 target, job["id"], snapshot_commit="unversioned", input_fingerprint="receipt-check",
             )
             self.assertEqual(accepted["status"], "succeeded")
             summary = bug_summary.write_summary(target, "full")
             self.assertEqual(summary["total_inconclusive"], 1)
-            self.assertEqual(state.bug_validation_ready(target, {"calc.py::inc"}), (True, ""))
+            self.assertEqual(state.bug_validation_ready(target, {state.candidate_id("calc.py::inc")}), (True, ""))
             self.assertTrue(self.gate(target)["ok"])
 
     def test_final_status_still_requires_matching_dynamic_attempts(self):
-        for recorded, claimed, prior_unsupported in (
+        for recorded, claimed, prior_inconclusive in (
             ("rejected", "inconclusive", False),
             ("inconclusive", "confirmed", False),
             ("inconclusive", "rejected", False),
             ("inconclusive", "rejected", True),
         ):
-            with self.subTest(recorded=recorded, claimed=claimed, prior_unsupported=prior_unsupported), tempfile.TemporaryDirectory() as temporary:
+            with self.subTest(recorded=recorded, claimed=claimed, prior_inconclusive=prior_inconclusive), tempfile.TemporaryDirectory() as temporary:
                 target = Path(temporary).resolve()
-                job = write_accepted_candidate(target, status=recorded, prior_unsupported=prior_unsupported)
+                job = write_accepted_candidate(target, status=recorded, prior_inconclusive=prior_inconclusive)
                 summary = bug_summary.write_summary(target, "full")
                 self.assertTrue(self.gate(target)["ok"])
                 path = target / job["bug_result_path"]
@@ -53,7 +53,7 @@ class MixedValidationGateTest(unittest.TestCase):
                 summary[f"total_{recorded}"] = 0
                 summary[f"total_{claimed}"] = 1
                 state.atomic_json(state.fm_dir(target) / "bug_validation/summary.json", summary)
-                self.assertFalse(state.bug_validation_ready(target, {"calc.py::inc"})[0])
+                self.assertFalse(state.bug_validation_ready(target, {state.candidate_id("calc.py::inc")})[0])
                 self.assertFalse(self.gate(target)["ok"])
 
 

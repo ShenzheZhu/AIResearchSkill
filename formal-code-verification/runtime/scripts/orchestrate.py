@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 from _common import project, state
@@ -43,7 +44,24 @@ def build_config(args, target, base=None):
     if args.extra_edge is not None: config["extra_edge"] = args.extra_edge
     if args.codegraph: config["call_graph_backend"] = "codegraph"
     if args.one_phase: config["one_phase"] = True
+    if getattr(args, "all_bugs", None) is not None:
+        config["all_bugs"] = args.all_bugs
     return config
+
+
+def developer_intent(target, args):
+    note = getattr(args, "note", "").strip()
+    intent_file = getattr(args, "incremental", None)
+    if intent_file:
+        path = Path(intent_file)
+        path = path if path.is_absolute() else target / path
+        if not path.is_file() or path.suffix.lower() not in {".md", ".markdown"}:
+            raise ValueError("--incremental requires a readable Markdown intent file")
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            raise ValueError("incremental intent must not be empty")
+        note = "\n\n".join(part for part in (text, note) if part)
+    return note
 
 
 def inspection_config(args, target):
@@ -54,7 +72,7 @@ def inspection_config(args, target):
     return build_config(args, target, base)
 
 
-def inspect(target, args, config=None):
+def inspect(target, args, config=None, intent_override=None):
     config = inspection_config(args, target) if config is None else dict(config)
     issues = valid_settings(target, config)
     if issues: return {"ok": False, "issues": issues}
@@ -64,12 +82,20 @@ def inspect(target, args, config=None):
     if not preflight["ok"]: return {"ok": False, "preflight": preflight}
     fingerprint, _ = state.fingerprint(target, config["one_phase"], config["submodules"], config.get("extra_edge"), config["knowledge"], config)
     baseline = state.inspect_baseline(target, fingerprint, config["submodules"])
-    mode = "noop" if baseline["valid"] and baseline.get("manifest_compatible") else "incremental" if baseline["valid"] else "full"
-    return {"ok": True, "mode": mode, "baseline": baseline, "config": config, "requires_codegraph": mode != "noop"}
+    try:
+        intent = developer_intent(target, args) if intent_override is None else intent_override
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "issues": [str(exc)]}
+    if getattr(args, "incremental", None) and not baseline["valid"]:
+        return {"ok": False, "issues": ["incremental analysis requires a compatible completed baseline: " + baseline.get("reason", "unavailable")]}
+    prior_intent = baseline.get("saved", {}).get("inputs", {}).get("config", {}).get("incremental_intent", "")
+    new_intent = bool(intent) and intent != prior_intent
+    mode = "noop" if baseline["valid"] and baseline.get("manifest_compatible") and not new_intent else "incremental" if baseline["valid"] else "full"
+    return {"ok": True, "mode": mode, "baseline": baseline, "config": config, "intent": intent, "requires_codegraph": mode != "noop"}
 
 
 def resume_overrides(args):
-    return bool(args.note.strip() or args.submodules or args.knowledge or args.extra_edge is not None or args.one_phase or args.codegraph)
+    return bool(args.note.strip() or getattr(args, "incremental", None) or args.submodules or args.knowledge or args.extra_edge is not None or args.one_phase or args.codegraph)
 
 
 def call_pipeline(target, action, mode=None, config=None):
@@ -112,6 +138,9 @@ def resume_plan(source_target, args):
         checked = state.inspect_resume(target)
         if not checked.get("ok"):
             return checked
+        requested = getattr(args, "all_bugs", None)
+        if requested is not None and requested != checked.get("config", {}).get("all_bugs", False):
+            return {"ok": False, "reason": "resume cannot change the all-bugs reasoning mode"}
         checkpoint_head = checkpoint.root(source_target) / "HEAD"
         if checkpoint_head.is_file():
             try:
@@ -136,6 +165,9 @@ def resume_plan(source_target, args):
     checked = state.inspect_resume(target)
     if not checked.get("ok"):
         return checked
+    requested = getattr(args, "all_bugs", None)
+    if requested is not None and requested != checked.get("config", {}).get("all_bugs", False):
+        return {"ok": False, "reason": "resume cannot change the all-bugs reasoning mode"}
     return {"ok": True, "target": target, "checked": checked, "source": "reconstructed_checkpoint", "checkpoint": rebuilt.get("checkpoint")}
 
 
@@ -161,9 +193,9 @@ def continue_current(source_target, args, *, automatic: bool):
     }
 
 
-def validate_inspect(target, function_id):
-    if not isinstance(function_id, str) or not function_id:
-        return {"ok": False, "reason": "--function-id is required"}
+def validate_inspect(target, identity):
+    if not isinstance(identity, str) or not identity:
+        return {"ok": False, "reason": "--function-id is required (a function or candidate ID)"}
     if snapshot_marker(target).get("snapshot"):
         return {"ok": False, "reason": "another FM-Agent snapshot is active"}
     preview = inspect(target, argparse.Namespace(submodules=[], knowledge=[], extra_edge=None, codegraph=False, one_phase=False))
@@ -172,13 +204,17 @@ def validate_inspect(target, function_id):
         return {"ok": False, "reason": "a valid completed FM-Agent baseline is required"}
     if not baseline.get("manifest_compatible"):
         return {"ok": False, "reason": baseline.get("manifest_reason") or "source changed after the baseline; run incremental analysis before dynamic validation", "changed_sources": baseline.get("changed_sources", [])}
-    if function_id not in state.direct_mismatch_ids(target):
-        return {"ok": False, "reason": "function is not a current direct MISMATCH candidate"}
-    return {"ok": True, "function_id": function_id, "baseline_commit": baseline["commit"], "config": preview["config"]}
+    candidates = state.direct_candidates(target, snapshot_commit=baseline["commit"])
+    matches = [key for key, item in candidates.items() if key == identity or item["function_id"] == identity]
+    if len(matches) != 1:
+        return {"ok": False, "reason": "choose exactly one current direct MISMATCH candidate", "candidate_ids": matches}
+    candidate_id = matches[0]
+    return {"ok": True, "function_id": candidates[candidate_id]["function_id"], "candidate_id": candidate_id,
+            "baseline_commit": baseline["commit"], "config": preview["config"]}
 
 
-def validation_bug_id(function_id: str) -> str:
-    return hashlib.sha256(function_id.encode()).hexdigest()[:16]
+def validation_bug_id(candidate_id: str, run_id: str, nonce: str) -> str:
+    return hashlib.sha256(candidate_id.encode()).hexdigest()[:16] + "-" + run_id + "-" + nonce
 
 
 def _replace_tree(origin: Path, destination: Path) -> None:
@@ -190,26 +226,17 @@ def _replace_tree(origin: Path, destination: Path) -> None:
     os.replace(temporary, destination)
 
 
-def merge_validation_candidate(source_target: Path, snapshot: Path, function_id: str) -> dict:
-    """Promote one completed validation without discarding other candidates.
-
-    The validation snapshot begins as a copy of the completed baseline.  Copy
-    only the targeted result/detail and its private probe evidence back to the
-    source project so later ``--validate`` invocations form one current-baseline
-    result set rather than replacing one another.
-    """
-    bug_id = validation_bug_id(function_id)
-    origin_root = state.fm_dir(snapshot) / "bug_validation"
-    destination_root = state.fm_dir(source_target) / "bug_validation"
-    origin_result = origin_root / f"{bug_id}.result.json"
-    if not origin_result.is_file():
-        raise ValueError("completed dynamic validation did not produce its result artifact")
+def merge_validation_candidate(source_target: Path, snapshot: Path, job: dict) -> dict:
+    """Promote only the assigned candidate report and its real probe evidence."""
+    bug_id = job["input"]["bug_id"]
+    origin_result = snapshot / job["bug_result_path"]
     result = state.read_json(origin_result, {})
-    if result.get("function_id") != function_id:
-        raise ValueError("completed dynamic validation result belongs to a different function")
+    if result.get("function_id") != job["input"]["function_id"] or result.get("candidate_id") != job["input"]["candidate_id"]:
+        raise ValueError("completed dynamic validation belongs to a different candidate")
+    destination_root = state.fm_dir(source_target) / "bug_validation"
     destination_root.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(origin_result, destination_root / origin_result.name)
-    origin_detail = origin_root / f"{bug_id}.md"
+    shutil.copy2(origin_result, source_target / job["bug_result_path"])
+    origin_detail = state.fm_dir(snapshot) / "bug_validation" / f"{bug_id}.md"
     if origin_detail.is_file():
         shutil.copy2(origin_detail, destination_root / origin_detail.name)
     origin_probe = state.skill_dir(snapshot) / "probes" / bug_id
@@ -219,79 +246,71 @@ def merge_validation_candidate(source_target: Path, snapshot: Path, function_id:
 
 
 def write_partial_validation_summary(target: Path) -> dict:
-    """Summarize all current-baseline reports after an on-demand validation."""
-    candidates = state.direct_mismatch_ids(target)
-    snapshot_commit = state.baseline_commit(target) or state.current_snapshot_commit(target)
-    root = state.fm_dir(target) / "bug_validation"
-    reports: dict[str, dict] = {}
-    for path in sorted(root.glob("*.result.json")) if root.is_dir() else []:
-        report = state.read_json(path, {})
-        function_id = report.get("function_id") if isinstance(report, dict) else None
-        if (
-            not isinstance(function_id, str)
-            or function_id not in candidates
-            or report.get("snapshot_commit") != snapshot_commit
-            or report.get("confirmation_status") not in state.BUG_FINAL_STATUSES
-            or not isinstance(report.get("attempts"), list)
-            or not report["attempts"]
-        ):
+    snapshot = state.baseline_commit(target) or state.current_snapshot_commit(target)
+    candidates = state.direct_candidates(target, snapshot_commit=snapshot)
+    reports = {}
+    for candidate_id in candidates:
+        try:
+            job = state.accepted_candidate(target, candidate_id, snapshot)
+        except ValueError:
             continue
-        plan = state.read_json(state.control_dir(target) / "job_plans" / "bug_validation.json", {})
-        entries = plan.get("entries") if isinstance(plan, dict) else None
-        entry = next((item for item in entries or [] if isinstance(item, dict) and item.get("function_id") == function_id), None)
-        if not isinstance(entry, dict) or not isinstance(entry.get("job_id"), str):
-            raise ValueError(f"accepted Bug Validation evidence unavailable for {function_id}: missing job plan")
-        job = scheduler.accepted_job(target, entry["job_id"], snapshot_commit=snapshot_commit, input_fingerprint=state.active_record(target).get("fingerprint", ""))
-        if job.get("bug_result_path") != path.relative_to(target).as_posix():
-            raise ValueError(f"accepted Bug Validation report path does not match {function_id}")
-        reports[function_id] = report
+        reports[candidate_id] = state.read_json(target / job["bug_result_path"], {})
     counts = {status: sum(report.get("confirmation_status") == status for report in reports.values()) for status in state.BUG_FINAL_STATUSES}
     summary = {
-        "schema_version": 1,
-        "snapshot_commit": snapshot_commit,
-        "dynamic_validation": "partial" if reports else "not_requested",
-        "total_candidates": len(candidates),
-        "total_static_findings": len(candidates - set(reports)),
-        "total_confirmed": counts["confirmed"],
-        "total_rejected": counts["rejected"],
-        "total_inconclusive": counts["inconclusive"],
-        "validated_function_ids": sorted(reports),
-        "static_finding_ids": sorted(candidates - set(reports)),
+        "schema_version": 2, "snapshot_commit": snapshot,
+        "dynamic_validation": "partial" if reports else "not_requested", "total_candidates": len(candidates),
+        "total_static_findings": len(set(candidates) - set(reports)), "total_confirmed": counts["confirmed"],
+        "total_rejected": counts["rejected"], "total_inconclusive": counts["inconclusive"],
+        "validated_function_ids": sorted({candidates[key]["function_id"] for key in reports}),
+        "validated_candidate_ids": sorted(reports), "static_finding_ids": sorted(set(candidates) - set(reports)),
         "generated_at": state.now(),
     }
-    state.atomic_json(root / "summary.json", summary)
+    state.atomic_json(state.fm_dir(target) / "bug_validation" / "summary.json", summary)
     return summary
 
 
-def validate_dispatch(source_target, function_id):
-    checked = validate_inspect(source_target, function_id)
+def validate_dispatch(source_target, identity):
+    checked = validate_inspect(source_target, identity)
     if not checked["ok"]:
         return checked
+    function_id, candidate_id = checked["function_id"], checked["candidate_id"]
     snapshot_data = create_snapshot(source_target)
     target = Path(snapshot_data["snapshot"]).resolve()
     try:
+        # Probe the original analyzed tree, including baselines captured from
+        # uncommitted source; current source compatibility was checked above.
+        if state.current_snapshot_commit(target) != checked["baseline_commit"]:
+            state.git(target, "checkout", "--detach", checked["baseline_commit"])
+            marker = snapshot_marker(target)
+            marker["snapshot_commit"] = checked["baseline_commit"]
+            state.atomic_json(state.skill_dir(target) / "isolation.json", marker)
+            state.atomic_json(state.skill_dir(source_target) / "isolation.json", marker)
+            state.git(source_target, "update-ref", "refs/fm-agent-skill/active", checked["baseline_commit"])
         lock = acquire(target)
-        bug_id = validation_bug_id(function_id)
-        for suffix in (".result.json", ".md"):
-            (state.fm_dir(target) / "bug_validation" / f"{bug_id}{suffix}").unlink(missing_ok=True)
-        shutil.rmtree(state.skill_dir(target) / "probes" / bug_id, ignore_errors=True)
+        baseline = state.read_json(state.skill_dir(source_target) / "baseline.json", {})
         record = {
             "schema_version": 2, "mode": "full", "status": "running",
             "started_at": state.now(), "current_phase": "bug_validation",
             "phases": ["bug_validation"], "phase_status": {"bug_validation": {"status": "running", "started_at": state.now(), "attempt": 1}},
             "phase_history": {}, "snapshot_commit": state.current_snapshot_commit(target), "baseline_commit": checked["baseline_commit"],
-            "fingerprint": state.read_json(state.skill_dir(source_target) / "baseline.json", {}).get("fingerprint", ""),
-            "inputs": {"config": checked["config"], "submodules": []},
-            "validation_scope": [function_id], "resume": {"count": 0},
+            "fingerprint": baseline.get("run_fingerprint", baseline.get("fingerprint", "")),
+            "inputs": baseline.get("inputs", {"config": checked["config"], "submodules": []}),
+            "validation_scope": [candidate_id], "resume": {"count": 0},
         }
         state.atomic_json(state.skill_dir(target) / "active.json", record)
+        bug_id = validation_bug_id(candidate_id, scheduler._run_id(target)[0], uuid.uuid4().hex[:8])
         job_id = f"bug-validation-{bug_id}"
-        scheduler.reset_bug_validation_job(target, job_id)
-        (state.skill_dir(target) / "worker_reports" / f"{job_id}.json").unlink(missing_ok=True)
+        record["validation_job_id"] = job_id
+        state.atomic_json(state.skill_dir(target) / "active.json", record)
         output = f"fm_agent/bug_validation/{bug_id}.result.json"
-        scheduler.create(target, {"id": job_id, "phase": "bug_validation", "type": "bug_validate", "depends_on": [], "required_outputs": [output], "artifacts": [], "input": {"bug_id": bug_id, "function_id": function_id, "mode": "full"}})
-        state.atomic_json(state.control_dir(target) / "job_plans" / "bug_validation.json", {"schema_version": 1, "phase": "bug_validation", "snapshot_commit": record["snapshot_commit"], "entries": [{"function_id": function_id, "job_id": job_id}], "created_jobs": 1, "total_entries": 1})
-        return {"ok": True, "project": str(target), "source_project": str(source_target), "job_id": job_id, "function_id": function_id, "config": checked["config"], "lock": lock}
+        scheduler.create(target, {"id": job_id, "phase": "bug_validation", "type": "bug_validate", "depends_on": [],
+            "required_outputs": [output], "artifacts": [],
+            "input": {"bug_id": bug_id, "candidate_id": candidate_id, "function_id": function_id, "mode": "full"}})
+        state.atomic_json(state.control_dir(target) / "job_plans" / "bug_validation.json", {
+            "schema_version": 1, "phase": "bug_validation", "snapshot_commit": record["snapshot_commit"],
+            "entries": [{"candidate_id": candidate_id, "function_id": function_id, "job_id": job_id}], "created_jobs": 1, "total_entries": 1})
+        return {"ok": True, "project": str(target), "source_project": str(source_target), "job_id": job_id,
+                "bug_id": bug_id, "function_id": function_id, "candidate_id": candidate_id, "config": checked["config"], "lock": lock}
     except Exception:
         discard_snapshot(target)
         raise
@@ -306,28 +325,30 @@ def validate_complete(source_target):
     scope = record.get("validation_scope") if isinstance(record, dict) else None
     if not isinstance(scope, list) or len(scope) != 1:
         return {"ok": False, "reason": "dynamic validation job has not completed"}
-    jobs = [job for job in scheduler.current_jobs_for_phase(snapshot, "bug_validation") if job.get("input", {}).get("function_id") == scope[0]]
+    jobs = [job for job in scheduler.current_jobs_for_phase(snapshot, "bug_validation") if job.get("id") == record.get("validation_job_id") and job.get("input", {}).get("candidate_id") == scope[0]]
     if len(jobs) != 1 or jobs[0].get("status") != "succeeded":
         return {"ok": False, "reason": "dynamic validation job has not completed"}
     scheduler.accepted_job(snapshot, jobs[0]["id"], snapshot_commit=record["snapshot_commit"], input_fingerprint=record.get("fingerprint", ""))
-    result = merge_validation_candidate(source_target, snapshot, scope[0])
+    result = merge_validation_candidate(source_target, snapshot, jobs[0])
     plan_path = state.control_dir(source_target) / "job_plans" / "bug_validation.json"
     plan = state.read_json(plan_path, {})
     entries = plan.get("entries", []) if plan.get("snapshot_commit") == record["snapshot_commit"] else []
-    entries = [entry for entry in entries if entry.get("function_id") != scope[0]]
-    entries.append({"function_id": scope[0], "job_id": jobs[0]["id"]})
+    entries = [entry for entry in entries if entry.get("candidate_id") != scope[0]]
+    entries.append({"candidate_id": scope[0], "function_id": jobs[0]["input"]["function_id"], "job_id": jobs[0]["id"]})
     state.atomic_json(plan_path, {
         "schema_version": 1, "phase": "bug_validation", "snapshot_commit": record["snapshot_commit"],
         "entries": entries, "created_jobs": len(entries), "total_entries": len(entries),
     })
     summary = write_partial_validation_summary(source_target)
     discard_snapshot(snapshot)
-    return {"ok": True, "function_id": scope[0], "result": result, "summary": summary}
+    return {"ok": True, "candidate_id": scope[0], "function_id": jobs[0]["input"]["function_id"], "result": result, "summary": summary}
 
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare one FM-Agent analysis in a private Git snapshot worktree.")
     parser.add_argument("action", choices=("inspect", "dispatch", "resume-inspect", "resume", "validate-inspect", "validate-dispatch", "validate-complete")); parser.add_argument("--project", required=True); parser.add_argument("--function-id"); parser.add_argument("--note", default=""); parser.add_argument("--submodule", dest="submodules", action="append", default=[]); parser.add_argument("--one-phase", action="store_true"); parser.add_argument("--extra-edge"); parser.add_argument("--knowledge", action="append", default=[]); parser.add_argument("--codegraph", action="store_true"); parser.add_argument("--force-stale-lock", action="store_true"); parser.add_argument("--take-over", action="store_true")
+    parser.add_argument("--incremental", metavar="INTENT_FILE")
+    parser.add_argument("--all-bugs", action=argparse.BooleanOptionalAction, default=None)
     args = parser.parse_args(); source_target = project(args)
     if args.action == "validate-inspect":
         result = validate_inspect(source_target, args.function_id); print(json.dumps(result, ensure_ascii=False, indent=2)); raise SystemExit(0 if result["ok"] else 2)
@@ -367,12 +388,15 @@ def main():
         print(json.dumps({"ok": True, "mode": "noop", "project": str(source_target), "baseline": preview["baseline"], "config": preview["config"], "analysis": record}, ensure_ascii=False, indent=2)); return
     try:
         snapshot = create_snapshot(source_target); target = Path(snapshot["snapshot"]).resolve()
-        selected = inspect(target, args, preview["config"])
+        selected = inspect(target, args, preview["config"], intent_override=preview["intent"])
         if not selected["ok"]: raise RuntimeError(str(selected))
         lock = acquire(target, args.force_stale_lock)
-        record = call_pipeline(target, "prepare", selected["mode"], selected["config"])
+        run_config = dict(selected["config"])
         if selected["mode"] == "incremental":
-            record["intent_path"] = str(state.build_intent(target, selected["baseline"]["commit"], args.note)); state.atomic_json(state.skill_dir(target) / "active.json", record)
+            run_config["incremental_intent"] = preview["intent"]
+        record = call_pipeline(target, "prepare", selected["mode"], run_config)
+        if selected["mode"] == "incremental":
+            record["intent_path"] = str(state.build_intent(target, selected["baseline"]["commit"], preview["intent"])); state.atomic_json(state.skill_dir(target) / "active.json", record)
         publish_run_index(target, record, None, "dispatch")
         print(json.dumps({"ok": True, "mode": selected["mode"], "project": str(target), "source_project": str(source_target), "snapshot": snapshot, "baseline": selected["baseline"], "config": selected["config"], "lock": lock, "analysis": record}, ensure_ascii=False, indent=2))
     except Exception as exc:

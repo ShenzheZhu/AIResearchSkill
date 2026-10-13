@@ -56,6 +56,8 @@ Evaluate independent discovery separately: have the agent derive P/Q/I and actua
 
 ## Observed Codex pipeline run: 2026-10-13
 
+This observed run used the earlier single-candidate verification format. It is historical acceptance evidence, not a forward test of the newer incremental, multi-candidate or loop-evidence schema. Preserve its original artifacts; a new format requires a fresh compatible analysis.
+
 The packaged runtime completed all nine full-analysis stages on the 13 selected functions using only current Codex/native Workers. Specification and implementation Workers received the neutral source and assigned artifacts, without this answer key, upstream issues or fixed-source controls.
 
 | Result | Count | Interpretation |
@@ -90,3 +92,28 @@ Expected artifact paths in the analysis checkout:
 The separate replay observed historical 4/8 passing, fixed 8/8 and recorded current 8/8. Four historical failing scenarios exercise one root defect. This trial does not cover other components, languages or integration environments.
 
 A separate cold-start discovery pass received only the neutral repository and the new skill entry, with no supplied function list or answer key. It identified 11 distinct obligations from the selected APIs and their real dependencies/consumers, proposed risk batches, and left unexecuted behavior and uncertain intent unknown. It did not invent database, network or permission flows for an in-process iterator library. This checks autonomous discovery and honest coverage accounting; it does not turn those additional obligations into verified results.
+
+## Execution optimization calibration: 2026-10-14
+
+A separate neutral Python fixture supplied one candidate: integer input `0`,
+required result `2`, actual public `inc(0)` result `1`. This was an assigned
+candidate, not autonomous bug discovery or a new public-repository audit.
+The Bug Worker started with `fork_turns="none"`, prepared its probe and cited
+caller/domain evidence. The Coordinator validated preparation before continuing
+that same isolated context with the execution ticket. Actual Python 3.13.14
+output was `CONFIRMED` and `value=0; expected=2; actual=1`, exit zero.
+
+The executor generated and accepted JSON/Markdown without a report Worker.
+The observed lifecycle used two model turns and one context start. Duplicate
+submission preserved report/evidence bytes and mtimes. Local artifacts are in
+`~/.codex/verification-runs/skill-efficiency-native-20261014/`; its
+`lifecycle-calibration.json` links the tickets and execution evidence. These
+observations establish this lifecycle only, not comparative wall-clock savings.
+
+Reusable deterministic checks cover missing/contradictory execution, independent
+candidates, accepted history, unsupported/runtime retries, receipt tampering,
+and summary idempotence. Partition checks group the same 24 small functions in
+three batches rather than eight while preserving every function and isolating
+oversized functions. The selected Python 3.12/parser suite passed 138 checks.
+No ECHO counterexample dispatch, real service, or multi-language native run was
+performed in this calibration.

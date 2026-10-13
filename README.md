@@ -38,7 +38,7 @@ The repository root is also a router skill:
   Draft, audit, run supporting experiments for, and polish OpenReview-style paper rebuttals with a full final-response Markdown format, reviewer-by-reviewer structure, evidence ledgers, paper-aligned preflight/smoke/full-run discipline, Markdown-ready tables, page-limit handling, agent-style review, and direct non-sycophantic wording.
 
 - `formal-code-verification/`
-  Autonomously map flows and verification targets, then run the bundled official FM-Agent Skill pipeline using only current Codex/native subagents. Generate caller-grounded `{P} C {Q}` specifications, execute counterexamples and track coverage gaps without duplicate tests. Includes a repeatable public-repository case and upstream attribution. No external model provider or API key is required.
+  Autonomously map flows and verification targets, then run the bundled official FM-Agent Skill pipeline using only current Codex/native subagents. Generate caller-grounded `{P} C {Q}` specifications, execute counterexamples and track coverage gaps without duplicate tests. Supports intent-driven incremental reuse, separate independent bug candidates and explicit loop obligations. Includes a repeatable public-repository case and upstream attribution. No external model provider or API key is required.
 
 ## Usage
 

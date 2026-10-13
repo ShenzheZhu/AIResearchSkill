@@ -19,6 +19,8 @@ from _common import project, state
 import durable_executor
 import executor
 import scheduler
+import checkpoint
+import job_planner
 from stage_gate import validate
 
 
@@ -38,7 +40,7 @@ def _phase_plan(target: Path, phase: str) -> dict:
     if current:
         return current[0]
     return scheduler.create(target, {
-        "id": f"{phase.replace('_', '-')}-phase-plan",
+        "id": job_planner._qualified_id(target, f"{phase.replace('_', '-')}-phase-plan"),
         "phase": phase,
         "type": "phase_plan",
         "depends_on": [],
@@ -57,7 +59,7 @@ def _static_edges(target: Path, phase: str) -> dict:
     if not isinstance(functions, list):
         raise ValueError("static edge resolution requires the current extraction manifest")
     return scheduler.create(target, {
-        "id": f"{phase.replace('_', '-')}-static-edges",
+        "id": job_planner._qualified_id(target, f"{phase.replace('_', '-')}-static-edges"),
         "phase": phase,
         "type": "resolve_agent_static_edges",
         "depends_on": [],
@@ -72,7 +74,16 @@ def _static_edges(target: Path, phase: str) -> dict:
 
 def _deterministic_action(target: Path, record: dict, phase: str) -> dict | None:
     """Return the only non-Worker action a parent may perform for this phase."""
-    if phase == "extraction":
+    if phase == "validate_baseline":
+        return {"action": "run_deterministic", "phase": phase, "kind": "validate_baseline", "argv": [
+            sys.executable, str(Path(__file__).with_name("executor.py")), "validate-baseline", "--project", str(target)]}
+    if phase == "preserve_specs":
+        return {"action": "run_deterministic", "phase": phase, "kind": "preserve_specs", "argv": [
+            sys.executable, str(Path(__file__).with_name("executor.py")), "preserve-specs", "--project", str(target)]}
+    if phase == "select_scope":
+        return {"action": "run_deterministic", "phase": phase, "kind": "select_seed", "argv": [
+            sys.executable, str(Path(__file__).with_name("executor.py")), "select", "--project", str(target)]}
+    if phase in {"extraction", "diff"}:
         command = [sys.executable, str(Path(__file__).with_name("executor.py")), "extract", "--project", str(target)]
         for source in record.get("inputs", {}).get("submodules", []):
             command += ["--submodule", source]
@@ -82,6 +93,9 @@ def _deterministic_action(target: Path, record: dict, phase: str) -> dict | None
             if not export.is_file():
                 return {"action": "run_deterministic", "phase": phase, "kind": "codegraph_export", "command": "codegraph export is required before extraction"}
             command += ["--codegraph-export", str(export)]
+        if phase == "diff":
+            return {"action": "run_deterministic", "phase": phase, "kind": "extract_and_diff", "argv": [command,
+                [sys.executable, str(Path(__file__).with_name("executor.py")), "diff", "--project", str(target)]]}
         return {"action": "run_deterministic", "phase": phase, "kind": "extract", "argv": command}
     if phase in {"call_graph", "rebuild_graph"}:
         command = [sys.executable, str(Path(__file__).with_name("executor.py")), "graph", "--project", str(target)]
@@ -129,6 +143,14 @@ def next_step(target: Path, limit: int, host: str) -> dict:
     record = state.active_record(target)
     if not record or record.get("status") != "running":
         raise RuntimeError("no running FM-Agent analysis")
+    if isinstance(record.get("validation_scope"), list) and record.get("validation_job_id"):
+        job = scheduler._load(target, record["validation_job_id"])
+        if job.get("status") == "succeeded":
+            source = checkpoint.source_project(target)
+            return {"action": "validation_ready_to_publish", "phase": "bug_validation", "job_id": job["id"],
+                    "candidate_id": job["input"]["candidate_id"], "source_project": str(source),
+                    "argv": [sys.executable, str(Path(__file__).with_name("orchestrate.py")),
+                             "validate-complete", "--project", str(source)]}
     if all(record.get("phase_status", {}).get(name, {}).get("status") == "succeeded" for name in record.get("phases", [])):
         record = _pipeline(target, "complete")
         return {"action": "analysis_completed", "analysis": record}
@@ -139,6 +161,23 @@ def next_step(target: Path, limit: int, host: str) -> dict:
     if phase_state.get("status") != "running":
         record = _pipeline(target, "phase-start", phase)
         return {"action": "phase_started", "phase": phase, "analysis": record, "next": "call phase_driver next again"}
+
+    if phase in {"preserve_specs", "diff", "select_scope"}:
+        filename = {"preserve_specs": "preserved_specs.json", "diff": "diff.json", "select_scope": "incremental_decision.json"}[phase]
+        artifact = state.read_json(state.control_dir(target) / filename, {})
+        if artifact.get("snapshot_commit") != record["snapshot_commit"]:
+            return _deterministic_action(target, record, phase)
+    if phase in {"specification", "update_specs"} and not scheduler.current_jobs_for_phase(target, phase) and not state._knowledge_manifest_ready(target)[0]:
+        return {"action": "run_deterministic", "phase": phase, "kind": "materialize_knowledge", "argv": [
+            sys.executable, str(Path(__file__).with_name("knowledge.py")), "materialize", "--project", str(target)]}
+    if phase == "select_scope":
+        job_planner._select_scope(target, record, phase)
+        import semantic_executor
+        semantic_executor.prepare(target, phase)
+    elif phase == "update_specs":
+        job_planner._update_specs(target, record, phase)
+        import semantic_executor
+        semantic_executor.prepare(target, phase)
 
     # Phase Plan is a first-class Worker job, never an instruction the parent
     # must remember to synthesize.

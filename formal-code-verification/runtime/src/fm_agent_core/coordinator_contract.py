@@ -46,10 +46,13 @@ def invocation(host: str = "auto") -> dict:
             "launch_mode": "parallel_returned_tickets",
             "developer_instruction": (
                 "Act as the sole FM-Agent Coordinator in the current Codex Agent. For every "
-                "returned ticket, first call collaboration.spawn_agent when it is in the current "
-                "tool list (or spawn_agent when exposed without a namespace), using a unique "
+                "returned ticket, follow its host_invocation. Start new Workers with "
+                "collaboration.spawn_agent (or spawn_agent when exposed without a namespace), using a unique "
                 "task_name derived from job_id and native_launch_arguments (fork_turns='none'). "
-                "Do not inherit the parent conversation. The message may contain only the returned "
+                "Only an execution ticket permitting candidate_continuation may instead continue its matching "
+                "isolated preparation Worker after the Coordinator validates preparation; never reuse "
+                "Spec/Verify contexts or another candidate/attempt. Do not inherit the parent conversation. "
+                "The message may contain only the returned "
                 "ticket, immutable worker definition, and evidence permitted by the ticket. "
                 "Launch all returned tickets up to the supplied limit in parallel. "
                 "Do not conclude native subagents are unavailable merely because this plugin has "

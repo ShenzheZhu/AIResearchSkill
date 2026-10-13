@@ -25,7 +25,9 @@ use Codex or Claude Code's internal subagent mechanism and must never invoke
 `FM-Agent/main.py`, import its pipeline, or call its remote-LLM API. For Bug
 Validator jobs, `bug_validation_executor.py` supplies the deterministic next
 action and invokes local safe runners in adapter mode; the host supplies its
-preparation, default agent-executed execution, and finalization Worker calls.
+preparation and default agent-executed execution calls. The runtime renders
+reports and receipts locally from validated immutable evidence and accepted
+attempt history.
 
 Use only two target-project output roots: `fm_agent/` for FM-Agent-compatible
 analysis artifacts and `fm_agent_skill/` for mutable Skill state. Derive no
@@ -47,7 +49,10 @@ Keep the Coordinator as a control plane, not a second reasoning worker. Give a
 semantic worker only its immutable dispatch ticket, registered Worker
 definition, assigned artifacts, and direct evidence; never give it
 the whole repository or a prior worker transcript. Workers cannot spawn other
-workers. Detailed worker output belongs in the assigned artifact; their final
+workers. Spec and Verify always have independent fresh contexts. A Bug execution
+ticket may continue only its same isolated preparation Worker after validation,
+with identical project/job/candidate/attempt/input hash; otherwise start fresh.
+Detailed worker output belongs in the assigned artifact; their final
 response is a short structured receipt. Read detailed artifacts only for a
 receipt escalation or a required deterministic validation.
 

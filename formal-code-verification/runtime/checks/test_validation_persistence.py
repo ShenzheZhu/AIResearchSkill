@@ -29,37 +29,27 @@ def bug_id(function_id: str) -> str:
 
 
 class ValidationPersistenceTest(unittest.TestCase):
-    def write_candidate(self, target: Path, function_id: str, marker: str) -> None:
-        digest = bug_id(function_id)
-        root = target / "fm_agent" / "bug_validation"
-        root.mkdir(parents=True, exist_ok=True)
-        (root / f"{digest}.result.json").write_text(
-            json.dumps({"function_id": function_id, "marker": marker}), encoding="utf-8"
-        )
-        probe = target / "fm_agent_skill" / "probes" / digest / "attempt_001"
-        probe.mkdir(parents=True, exist_ok=True)
-        (probe / "reproduction_result.json").write_text(marker, encoding="utf-8")
-
     def test_merging_one_candidate_preserves_another_candidates_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            source = Path(temporary) / "source"
-            snapshot = Path(temporary) / "snapshot"
+            source = (Path(temporary) / "source").resolve()
+            snapshot = (Path(temporary) / "snapshot").resolve()
             first, second = "src/a.c::first", "src/b.c::second"
-            self.write_candidate(source, first, "old-first")
-            self.write_candidate(source, second, "old-second")
-            self.write_candidate(snapshot, first, "new-first")
-            result = orchestrate.merge_validation_candidate(source, snapshot, first)
-            self.assertEqual(result["marker"], "new-first")
-            for function_id, marker in ((first, "new-first"), (second, "old-second")):
-                digest = bug_id(function_id)
-                self.assertEqual(
-                    json.loads((source / "fm_agent" / "bug_validation" / f"{digest}.result.json").read_text(encoding="utf-8"))["marker"],
-                    marker,
-                )
-                self.assertEqual(
-                    (source / "fm_agent_skill" / "probes" / digest / "attempt_001" / "reproduction_result.json").read_text(encoding="utf-8"),
-                    marker,
-                )
+            write_accepted_candidate(source, first, bug_id(first), "rejected")
+            second_job = write_accepted_candidate(source, second, bug_id(second), "rejected")
+            second_report = (source / second_job["bug_result_path"]).read_bytes()
+            second_probe = source / "fm_agent_skill/probes" / bug_id(second) / "attempt_001/reproduction_result.json"
+            second_evidence = second_probe.read_bytes()
+            job = write_accepted_candidate(snapshot, first, bug_id(first))
+            result = orchestrate.merge_validation_candidate(source, snapshot, job)
+            self.assertEqual(result["confirmation_status"], "confirmed")
+            self.assertEqual(result["candidate_id"], job["input"]["candidate_id"])
+            self.assertEqual((source / job["bug_result_path"]).read_bytes(), (snapshot / job["bug_result_path"]).read_bytes())
+            self.assertEqual((source / second_job["bug_result_path"]).read_bytes(), second_report)
+            self.assertEqual(second_probe.read_bytes(), second_evidence)
+            self.assertEqual(
+                (source / "fm_agent_skill/probes" / bug_id(first) / "attempt_001/reproduction_result.json").read_bytes(),
+                (snapshot / "fm_agent_skill/probes" / bug_id(first) / "attempt_001/reproduction_result.json").read_bytes(),
+            )
 
     def test_partial_summary_accumulates_only_current_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -70,7 +60,7 @@ class ValidationPersistenceTest(unittest.TestCase):
             target = target.resolve()
             write_accepted_candidate(target, first, bug_id(first))
             write_accepted_candidate(target, second, bug_id(second), "rejected")
-            (root / f"{bug_id(stale)}.result.json").write_text(json.dumps({
+            (root / f"{bug_id(stale)}.result.json").write_text(json.dumps({"candidate_id": state.candidate_id(stale), "schema_version": 2, "bug_id": "candidate",
                 "function_id": stale, "snapshot_commit": "old-baseline", "confirmation_status": "confirmed",
                 "attempts": [{"ordinal": 1}],
             }), encoding="utf-8")

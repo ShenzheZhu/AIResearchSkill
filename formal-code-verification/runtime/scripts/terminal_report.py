@@ -53,27 +53,16 @@ def _verification_results(target: Path, snapshot_commit: str) -> list[dict]:
             continue
         artifact = state.fm_dir(target) / "extracted_functions" / item["artifact"]
         valid, _ = state.verification_result_ready(target, artifact, item.get("id"), payload, snapshot_commit)
-        if valid and payload.get("snapshot_commit") == snapshot_commit:
+        if valid:
             results.append(payload)
     return results
 
 
 def _bug_results(target: Path, snapshot_commit: str, candidates: set[str]) -> list[dict]:
-    import scheduler
-    fingerprint = state.active_record(target).get("fingerprint", "")
-    plan = state.read_json(state.control_dir(target) / "job_plans" / "bug_validation.json", {})
-    entries = plan.get("entries") if isinstance(plan, dict) else None
     results = []
-    for function_id in sorted(candidates):
-        # Use the persisted plan's identity, never accept an unregistered file.
-        if not isinstance(entries, list):
-            raise ValueError(f"accepted Bug Validation evidence unavailable for {function_id}: missing job plan")
-        entry = next((item for item in entries if isinstance(item, dict) and item.get("function_id") == function_id), None)
-        if not isinstance(entry, dict) or not isinstance(entry.get("job_id"), str):
-            raise ValueError(f"accepted Bug Validation evidence unavailable for {function_id}: missing job plan")
-        job = scheduler.accepted_job(target, entry["job_id"], snapshot_commit=snapshot_commit, input_fingerprint=fingerprint)
-        if job.get("input", {}).get("function_id") != function_id:
-            raise ValueError(f"accepted Bug Validation identity does not match {function_id}")
+    for candidate_id in sorted(candidates):
+        job = state.accepted_candidate(target, candidate_id, snapshot_commit)
+        function_id = job["input"]["function_id"]
         relative = job["bug_result_path"]
         payload = state.read_json(target / relative, None)
         status = payload.get("confirmation_status")
@@ -82,7 +71,7 @@ def _bug_results(target: Path, snapshot_commit: str, candidates: set[str]) -> li
             continue
         dynamic = []
         for attempt in attempts:
-            valid, _ = state._dynamic_attempt_ready(target, attempt, snapshot_commit)
+            valid, _ = state._dynamic_attempt_ready(target, attempt, payload["snapshot_commit"])
             if valid:
                 dynamic.append(attempt)
         if not dynamic:
@@ -110,6 +99,9 @@ def _bug_results(target: Path, snapshot_commit: str, candidates: set[str]) -> li
             interpretation = "dynamic execution reproduced the contract violation"
         results.append({
             "function_id": function_id,
+            "candidate_id": candidate_id,
+            "evidence_snapshot_commit": payload["snapshot_commit"],
+            "retained": payload["snapshot_commit"] != snapshot_commit,
             "status": status,
             "attempt_count": len(dynamic),
             "attempts": attempt_evidence,
@@ -175,18 +167,16 @@ def _business_coverage(target: Path, snapshot_commit: str) -> dict:
                         valid, _ = state.verification_result_ready(target, artifact, function_id, verification, snapshot_commit)
                         if not valid or verification.get("verdict") != "MISMATCH" or row["requirement"] != spec.get("post_condition"):
                             raise ValueError("coverage requirement must equal the assigned validated specification postcondition")
-                        plan = state.read_json(state.control_dir(target) / "job_plans" / "bug_validation.json", {})
-                        entry = next((value for value in plan.get("entries", []) if isinstance(value, dict) and value.get("function_id") == function_id), None)
-                        if plan.get("schema_version") != 1 or plan.get("phase") != "bug_validation" or plan.get("snapshot_commit") != snapshot_commit or not isinstance(entry, dict):
-                            raise ValueError("coverage function has no current planned Bug Validation job")
-                        native_job = scheduler.accepted_job(target, entry["job_id"], snapshot_commit=snapshot_commit, input_fingerprint=state.active_record(target).get("fingerprint", ""))
-                        if native_job["input"]["function_id"] != function_id:
-                            raise ValueError("coverage function does not own the accepted Bug Validation job")
+                        candidate_id = row.get("candidate_id")
+                        assigned = state.direct_candidates(target, {function_id}, snapshot_commit=snapshot_commit)
+                        if candidate_id not in assigned:
+                            raise ValueError("coverage requires its assigned candidate identity")
+                        native_job = state.accepted_candidate(target, candidate_id, snapshot_commit)
                         report = state.read_json(target / native_job["bug_result_path"], {})
                         recorded_attempts = {(attempt["ordinal"], attempt["dynamic_evidence"]["reproduction_result"]) for attempt in report["attempts"]}
                     bug_id, attempt = result["bug_id"], result["attempt"]
                     expected = bug_validation_executor.attempt_dir(target, bug_id, attempt) / "reproduction_result.json"
-                    if bug_id != native_job["input"]["bug_id"] or evidence_path != expected or (attempt, evidence_path.relative_to(target).as_posix()) not in recorded_attempts or result.get("state") != "completed" or result.get("language") != function.get("language"):
+                    if result.get("candidate_id") != native_job["input"]["candidate_id"] or bug_id != native_job["input"]["bug_id"] or evidence_path != expected or (attempt, evidence_path.relative_to(target).as_posix()) not in recorded_attempts or result.get("state") != "completed" or result.get("language") != function.get("language"):
                         raise ValueError("execution does not belong to the assigned accepted Bug Validation attempt")
                     outcomes.add(result["classification"])
                 except (KeyError, TypeError, ValueError, OSError) as exc:
@@ -217,10 +207,11 @@ def build(target: Path) -> dict:
     reasoning_counts = {verdict: sum(item.get("verdict") == verdict for item in verification) for verdict in sorted(state.VERDICTS)}
     reasoning_gaps = [{"function_id": item["function_id"], "verdict": item["verdict"], "details": item.get("gaps") or item.get("error") or item.get("reasoning")} for item in verification if item.get("verdict") in {"INCONCLUSIVE", "DEPENDENCY_RISK", "ERROR"}]
     coverage = _business_coverage(target, checked["snapshot_commit"])
-    mismatches = {
-        result["function_id"] for result in verification
-        if result.get("verdict") == "MISMATCH" and isinstance(result.get("function_id"), str)
+    candidate_functions = {
+        candidate["candidate_id"]: result["function_id"] for result in verification
+        if result.get("verdict") == "MISMATCH" for candidate in result.get("candidates", [])
     }
+    mismatches = set(candidate_functions)
     acceptance_error = None
     try:
         bug_results = _bug_results(target, checked["snapshot_commit"], mismatches)
@@ -229,13 +220,13 @@ def build(target: Path) -> dict:
     confirmed = [item for item in bug_results if item["status"] == "confirmed"]
     rejected = [item for item in bug_results if item["status"] == "rejected"]
     inconclusive = [item for item in bug_results if item["status"] == "inconclusive"]
-    bv_function_ids = {item["function_id"] for item in bug_results}
+    bv_function_ids = {item["candidate_id"] for item in bug_results}
     # MISMATCH with no Bug Validation result is a static finding, not
     # inconclusive.  It carries its concrete counterexample and source quote
     # from the Verification Worker.
     static_finding_ids = mismatches - bv_function_ids
     static_findings = [
-        {"function_id": fid, "status": "static_finding",
+        {"candidate_id": fid, "function_id": candidate_functions[fid], "status": "static_finding",
          "interpretation": "high-confidence static identification with concrete counterexample and exact source quote; not dynamically confirmed"}
         for fid in sorted(static_finding_ids)
     ]

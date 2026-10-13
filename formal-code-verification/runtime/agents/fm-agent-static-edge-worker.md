@@ -17,7 +17,8 @@ Write exactly one assigned candidate JSON file below `fm_agent/`:
 
 Every artifact must be a distinct current path relative to
 `fm_agent/extracted_functions/`. Include only evidence-supported direct calls.
-Return only a compact JSON receipt with job id, output path, and
+Return only a compact JSON receipt with exact `job_id`, `status: "completed"`,
+`outputs` equal to the assigned required output paths, and
 `counts: {"edges": n}`. The Coordinator must validate
 and promote the candidate through `executor.py record-agent-edges` before it
 can affect layers or incremental propagation.

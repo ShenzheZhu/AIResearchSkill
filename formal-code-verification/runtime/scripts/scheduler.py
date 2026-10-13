@@ -41,7 +41,6 @@ DEFAULT_CAPS = {
     "spec_concurrency": 8,
     "verify_concurrency": 12,
     "bug_validation_concurrency": 4,
-    "bug_validation_finalize_concurrency": 2,
     "read_only_plan_concurrency": 4,
 }
 
@@ -247,46 +246,21 @@ def _type_cap(job_type, caps):
     return caps.get(TYPE_CAP_KEYS.get(job_type), 1)
 def _running(target):
     connection = _connect(target)
-    rows = connection.execute("SELECT payload_json FROM jobs WHERE status='running' ORDER BY job_id").fetchall()
+    rows = connection.execute("SELECT payload_json FROM jobs WHERE run_id=? AND status='running' ORDER BY job_id", (_run_id(target)[0],)).fetchall()
     connection.close()
     return [json.loads(row["payload_json"]) for row in rows]
 
 
-def _bug_validation_stage(job):
-    """Return the durable scheduling state for a live Bug Validator job.
-
-    Older checkpoints have no field and therefore conservatively retain a
-    primary validation slot until they reach a terminal scheduler state.
-    """
-    return job.get("bug_validation_stage", "validation")
-
-
-def _uses_worker_slot(job):
-    return not (job.get("type") == "bug_validate" and _bug_validation_stage(job) == "ready_to_finalize")
-
-
 def _capacity(target):
     caps, running = _caps(target), _running(target)
-    active_jobs = [job for job in running if _uses_worker_slot(job)]
     by_type = {
-        kind: sum(
-            1 for job in active_jobs
-            if job.get("type") == kind and not (kind == "bug_validate" and _bug_validation_stage(job) == "finalization")
-        )
+        kind: sum(1 for job in running if job.get("type") == kind)
         for kind in JOB_TYPES
     }
     return {
         "caps": caps,
-        "active": len(active_jobs),
+        "active": len(running),
         "by_type": by_type,
-        "bug_validation_finalizing": sum(
-            1 for job in active_jobs
-            if job.get("type") == "bug_validate" and _bug_validation_stage(job) == "finalization"
-        ),
-        "bug_validation_ready_to_finalize": sum(
-            1 for job in running
-            if job.get("type") == "bug_validate" and _bug_validation_stage(job) == "ready_to_finalize"
-        ),
     }
 def _admission_error(target, job):
     capacity = _capacity(target); caps = capacity["caps"]
@@ -297,56 +271,6 @@ def _admission_error(target, job):
     return None
 
 
-def mark_bug_validation_ready_to_finalize(target, job_id):
-    """Release the probe slot once immutable execution evidence is accepted."""
-    job = _load(target, job_id)
-    if job.get("type") != "bug_validate" or job.get("status") != "running":
-        raise ValueError("only a running Bug Validator can await finalization")
-    stage = _bug_validation_stage(job)
-    if stage == "validation":
-        job["bug_validation_stage"] = "ready_to_finalize"
-        _save(target, job)
-    elif stage not in {"ready_to_finalize", "finalization"}:
-        raise ValueError("invalid Bug Validator scheduling stage")
-    return _load(target, job_id)
-
-
-def claim_bug_validation_finalization(target, job_id):
-    """Reserve a bounded finalization worker without consuming a probe slot."""
-    job = _load(target, job_id)
-    if job.get("type") != "bug_validate" or job.get("status") != "running":
-        raise ValueError("only a running Bug Validator can finalize")
-    if _bug_validation_stage(job) == "finalization":
-        return job
-    if _bug_validation_stage(job) != "ready_to_finalize":
-        raise ValueError("Bug Validator execution evidence has not been accepted")
-    capacity = _capacity(target); caps = capacity["caps"]
-    if capacity["active"] >= caps["max_active_subagents"]:
-        raise ValueError(f"global subagent capacity reached ({capacity['active']}/{caps['max_active_subagents']})")
-    active = capacity["bug_validation_finalizing"]
-    limit = caps["bug_validation_finalize_concurrency"]
-    if active >= limit:
-        raise ValueError(f"bug validation finalization capacity reached ({active}/{limit})")
-    job["bug_validation_stage"] = "finalization"
-    _save(target, job)
-    return _load(target, job_id)
-
-
-def admissible_bug_validation_finalizations(target, limit=None):
-    """List unleased finalize passes that fit their own and global pools."""
-    capacity = _capacity(target); caps = capacity["caps"]
-    available = min(
-        caps["bug_validation_finalize_concurrency"] - capacity["bug_validation_finalizing"],
-        caps["max_active_subagents"] - capacity["active"],
-    )
-    if limit is not None:
-        available = min(available, max(0, int(limit)))
-    if available <= 0:
-        return []
-    return [
-        job for job in _running(target)
-        if job.get("type") == "bug_validate" and _bug_validation_stage(job) == "ready_to_finalize"
-    ][:available]
 def _validate_report(job, result):
     # Keep interrupted analyses created by the pre-receipt scheduler resumable.
     # New manifests always carry phase + receipt requirements.
@@ -387,6 +311,18 @@ def _negative_attempts(target, payload):
     value = payload.get("negative_retries", default)
     if not isinstance(value, int) or value < 0: raise ValueError("negative_retries must be a non-negative integer")
     return value + 1
+
+
+def _bug_input(target, payload):
+    data = payload.get("input", {})
+    if not all(isinstance(data.get(key), str) and data[key] for key in ("function_id", "candidate_id", "bug_id")):
+        raise ValueError("Bug Validator requires distinct candidate and function identities")
+    _safe_id(data["bug_id"])
+    connection = _connect(target)
+    prior = connection.execute("SELECT job_id FROM jobs WHERE type='bug_validate' AND json_extract(payload_json,'$.input.bug_id')=?", (data["bug_id"],)).fetchone()
+    connection.close()
+    if prior is not None:
+        raise ValueError("Bug Validator immutable attempt namespace already belongs to another job")
 def _validate(target, job, result=None, *, snapshot_commit=None):
     errors = []
     missing = [item for item in job.get("required_outputs", []) if not (target / item).exists()]
@@ -458,11 +394,20 @@ def _validate(target, job, result=None, *, snapshot_commit=None):
         snapshot_commit = snapshot_commit or state.current_snapshot_commit(target)
         report = state.read_json(target / job["bug_result_path"], {})
         function_id = job.get("input", {}).get("function_id")
+        candidate_id = job.get("input", {}).get("candidate_id")
         if not isinstance(function_id, str) or not isinstance(report, dict) or report.get("function_id") != function_id:
             return "Bug Validator report function identity does not match its assigned job"
+        if report.get("schema_version") != 2 or not isinstance(candidate_id, str) or report.get("candidate_id") != candidate_id or report.get("bug_id") != job.get("input", {}).get("bug_id"):
+            return "Bug Validator report candidate identity does not match its assigned job"
         attempts = report.get("attempts") if isinstance(report, dict) else None
         index = int(job.get("negative_attempt_index", 1))
         if not isinstance(attempts, list) or len(attempts) < index: return "Bug Validator result must append the current probe to attempts"
+        ordinals = [recorded.get("ordinal") for recorded in attempts if isinstance(recorded, dict)]
+        if len(ordinals) != len(attempts) or any(not isinstance(ordinal, int) or ordinal < 1 for ordinal in ordinals) or ordinals != sorted(set(ordinals)):
+            return "Bug Validator attempt ordinals must be distinct and ordered"
+        prior = job.get("validated_attempts", [])
+        if attempts[:len(prior)] != prior or len(attempts) != len(prior) + (job.get("status") != "succeeded"):
+            return "Bug Validator must preserve every previously accepted semantic attempt"
         if report.get("snapshot_commit") != snapshot_commit: return "Bug Validator report snapshot does not match accepted analysis"
         if report.get("confirmation_status") not in state.BUG_FINAL_STATUSES: return "Bug Validator report has invalid confirmation status"
         if report["confirmation_status"] == "rejected" and any(recorded.get("classification") != "not_reproduced" for recorded in attempts if isinstance(recorded, dict)):
@@ -497,6 +442,15 @@ def _validate(target, job, result=None, *, snapshot_commit=None):
                     return "Bug Validator execution outcome contradicts its recorded command evidence"
             except ValueError as exc:
                 return f"Bug Validator execution evidence is invalid: {exc}"
+        # Accepted negative outcomes remain immutable while the same job retries.
+        connection = sqlite3.connect(f"{checkpoint.db_path(target).resolve().as_uri()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        sealed = connection.execute("SELECT path,sha256,size FROM artifacts WHERE job_id=? AND path LIKE 'fm_agent_skill/probes/%'", (job["id"],)).fetchall()
+        connection.close()
+        for item in sealed:
+            path = target / item["path"]
+            if not path.is_file() or state.file_hash(path) != item["sha256"] or path.stat().st_size != item["size"]:
+                return "previously accepted dynamic evidence bytes have changed"
     return None
 def _fail(job, kind, message):
     if kind not in FAILURE_CLASSES: raise ValueError("unsupported failure class")
@@ -538,6 +492,8 @@ def create(target, payload):
     if legacy_contract: job["legacy_contract"] = True
     elif kind == "bug_validate": job.update({"bug_result_path": bug_results[0], "negative_max_attempts": _negative_attempts(target, payload), "negative_attempts": 0, "runtime_attempts": 0})
     if isinstance(payload.get("input"), dict): job["input"] = payload["input"]
+    if kind == "bug_validate" and not legacy_contract:
+        _bug_input(target, payload)
     _persist(target, job, insert=True); return job
 
 
@@ -547,11 +503,18 @@ def create_many(target, payloads):
     run_id, snapshot, fingerprint = _run_id(target)
     now = state.now(); jobs = []
     seen = set()
+    bug_ids = set()
     for payload in payloads:
         if not isinstance(payload, dict): raise ValueError("job JSON must be an object")
         job_id, kind = _safe_id(payload.get("id")), payload.get("type")
         if job_id in seen: raise ValueError(f"duplicate job id: {job_id}")
         if kind not in JOB_TYPES: raise ValueError("unsupported job type")
+        if kind == "bug_validate":
+            _bug_input(target, payload)
+            bug_id = payload["input"]["bug_id"]
+            if bug_id in bug_ids:
+                raise ValueError("Bug Validator attempt namespace is duplicated in the batch")
+            bug_ids.add(bug_id)
         seen.add(job_id)
         phase = _phase(payload.get("phase", "unspecified"))
         deps = payload.get("depends_on", [])
@@ -602,7 +565,7 @@ def _expire_leases(target):
     try:
         rows = connection.execute(
             "SELECT l.job_id,j.payload_json FROM leases l JOIN jobs j ON j.job_id=l.job_id "
-            "WHERE l.expires_at<=?", (now,),
+            "WHERE l.expires_at<=? AND j.run_id=?", (now, _run_id(target)[0]),
         ).fetchall()
         expired = []
         for row in rows:
@@ -630,10 +593,10 @@ def _expire_leases(target):
 def ready(target, limit=None, offset=0):
     _expire_leases(target)
     connection = _connect(target)
-    sql = "SELECT payload_json FROM jobs WHERE status='queued' AND remaining_dependencies=0 ORDER BY job_id"
-    parameters = ()
+    sql = "SELECT payload_json FROM jobs WHERE run_id=? AND status='queued' AND remaining_dependencies=0 ORDER BY job_id"
+    parameters = (_run_id(target)[0],)
     if limit is not None:
-        sql += " LIMIT ? OFFSET ?"; parameters = (max(0, int(limit)), max(0, int(offset)))
+        sql += " LIMIT ? OFFSET ?"; parameters += (max(0, int(limit)), max(0, int(offset)))
     rows = connection.execute(sql, parameters).fetchall()
     connection.close()
     return [json.loads(row["payload_json"]) for row in rows]
@@ -786,14 +749,37 @@ def heartbeat_lease(target, job_id, attempt=None):
 
 
 def _artifact_identity(target, job):
+    paths = set(job.get("required_outputs", []))
+    if job.get("type") == "bug_validate" and not job.get("legacy_contract"):
+        from reproduction_runner import attempt_dir
+        for ordinal in range(1, int(job.get("attempts", 0)) + 1):
+            root = attempt_dir(target, job["input"]["bug_id"], ordinal)
+            paths.update(path.relative_to(target).as_posix() for path in root.glob("probe.*") if path.is_file())
+            paths.update((root / name).relative_to(target).as_posix() for name in ("reproduction.json", "reproduction_result.json", "build_profile.json", "build_result.json") if (root / name).is_file())
+        detail = target / (job["bug_result_path"].removesuffix(".result.json") + ".md")
+        if detail.is_file():
+            paths.add(detail.relative_to(target).as_posix())
     values = []
-    for relative in job.get("required_outputs", []):
+    for relative in sorted(paths):
         path = target / relative
         if not path.is_file(): continue
         digest = state.file_hash(path)
         values.append({"path": relative, "sha256": digest, "size": path.stat().st_size})
     combined = hashlib.sha256(json.dumps(values, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return combined, values
+
+
+def accepted_origin(target, job_id):
+    """Read the immutable run identity without importing or rebinding a job."""
+    _safe_id(job_id)
+    path = checkpoint.db_path(target)
+    if not path.is_file():
+        raise ValueError("accepted scheduler database is missing")
+    with sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True) as connection:
+        row = connection.execute("SELECT r.snapshot_commit,r.input_fingerprint FROM jobs j JOIN runs r ON r.run_id=j.run_id WHERE j.job_id=?", (job_id,)).fetchone()
+    if row is None:
+        raise ValueError("accepted job has no originating run")
+    return {"snapshot_commit": row[0], "input_fingerprint": row[1]}
 
 
 def accepted_job(target, job_id, *, snapshot_commit, input_fingerprint):
@@ -904,7 +890,6 @@ def transition(target, job_id, action, result, message, failure_class, attempt=N
         job["status"] = "running"; job["attempts"] += 1; job["started_at"] = state.now()
         if job["type"] == "bug_validate" and not job.get("legacy_contract"):
             job["negative_attempt_index"] = int(job.get("negative_attempts", 0)) + 1
-            job["bug_validation_stage"] = "validation"
         connection = _connect(target)
         connection.execute("BEGIN IMMEDIATE")
         try:
@@ -967,13 +952,22 @@ def transition(target, job_id, action, result, message, failure_class, attempt=N
         elif job["type"] == "bug_validate" and not job.get("legacy_contract") and result["classification"] in BUG_NEGATIVE_CLASSIFICATIONS:
             negative_attempts = int(job.get("negative_attempts", 0)) + 1
             job["negative_attempts"] = negative_attempts; job["result"] = result
-            if negative_attempts < int(job["negative_max_attempts"]):
+            report = state.read_json(target / job["bug_result_path"], {})
+            evidence = report["attempts"][-1]["dynamic_evidence"]["reproduction_result"]
+            unsupported = state.read_json(target / evidence, {})["state"] == "unsupported"
+            if unsupported:
+                # Repeating an unavailable runtime cannot add execution evidence.
+                job.update({"status": "succeeded", "completed_at": state.now()})
+            elif negative_attempts < int(job["negative_max_attempts"]):
                 job.update({"status": "retryable", "retry_reason": "negative_result", "message": "Bug Validator did not confirm the candidate; repeat probe required"})
             else: job.update({"status": "succeeded", "completed_at": state.now(), "negative_validation_exhausted": True})
         else:
             job["status"] = "succeeded"; job["completed_at"] = state.now()
             if result is not None: job["result"] = result
-        if job["status"] == "succeeded":
+        accepted_semantic_attempt = error is None and job["type"] == "bug_validate" and not job.get("legacy_contract")
+        if accepted_semantic_attempt:
+            job["validated_attempts"] = state.read_json(target / job["bug_result_path"], {})["attempts"]
+        if job["status"] == "succeeded" or accepted_semantic_attempt:
             computed, _ = _artifact_identity(target, job)
             if artifact_hash is not None and artifact_hash != computed:
                 raise ValueError("receipt artifact hash mismatch")
@@ -996,11 +990,6 @@ def transition(target, job_id, action, result, message, failure_class, attempt=N
         if job["status"] != "retryable": raise ValueError("only a retryable job can be requeued")
         job["status"] = "queued"; job["requeued_at"] = state.now()
     _save(target, job)
-    if action == "complete":
-        activated = _activate_mismatch_jobs(target, job)
-        if job.get("valid_outputs"):
-            activated += _activate_mismatch_jobs(target, job, job["valid_outputs"], [])
-        if activated: job["activated_bug_validation_jobs"] = activated
     return job
 def recover(target):
     run_id, _, _ = _run_id(target)
@@ -1129,36 +1118,6 @@ def clear_run(target):
     return {"cleared": True}
 
 
-def _activate_mismatch_jobs(target, job, outputs=None, dependencies=None):
-    if job.get("type") not in {"verify_function", "verify_batch"} or (outputs is None and job.get("status") != "succeeded"):
-        return []
-    # Bug Validation is planned only after the Verification phase gate.  Do
-    # not stream mismatch jobs into a still-running specification or
-    # verification phase; the deterministic bug_validation plan becomes the
-    # sole candidate/job binding point.
-    if state.active_record(target).get("current_phase") != "bug_validation":
-        return []
-    record = state.active_record(target)
-    created = []
-    for output in outputs if outputs is not None else job.get("required_outputs", []):
-        verification = state.read_json(target / output, {})
-        function_id = verification.get("function_id") if isinstance(verification, dict) else None
-        if verification.get("verdict") != "MISMATCH" or not isinstance(function_id, str):
-            continue
-        digest = hashlib.sha256(function_id.encode("utf-8")).hexdigest()[:16]
-        job_id = f"bug-validation-{digest}"
-        connection = _connect(target)
-        exists = connection.execute("SELECT 1 FROM jobs WHERE job_id=?", (job_id,)).fetchone()
-        connection.close()
-        if exists: continue
-        create(target, {
-            "id": job_id, "phase": "bug_validation", "type": "bug_validate",
-            "depends_on": [job["id"]] if dependencies is None else dependencies, "required_outputs": [f"fm_agent/bug_validation/{digest}.result.json"],
-            "artifacts": [],
-            "input": {"bug_id": digest, "function_id": function_id, "mode": record.get("mode", "full")},
-        })
-        created.append(job_id)
-    return created
 def main():
     parser = argparse.ArgumentParser(description="Record, admit, and validate bounded current FM-Agent host worker jobs.")
     parser.add_argument("action", choices=("create", "ready", "admissible", "capacity", "aggregate", "phase-receipt", "start", "heartbeat", "complete", "fail", "retry", "recover", "show")); parser.add_argument("--project", required=True); parser.add_argument("--job-id"); parser.add_argument("--phase"); parser.add_argument("--job-json"); parser.add_argument("--result-json"); parser.add_argument("--message"); parser.add_argument("--failure-class", choices=tuple(sorted(FAILURE_CLASSES)), default="execution"); parser.add_argument("--attempt", type=int); parser.add_argument("--input-hash"); parser.add_argument("--artifact-hash"); parser.add_argument("--limit", type=int); parser.add_argument("--offset", type=int, default=0)

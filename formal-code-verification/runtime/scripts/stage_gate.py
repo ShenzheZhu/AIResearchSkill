@@ -14,6 +14,9 @@ def json_object(path): return isinstance(state.read_json(path, None), dict)
 
 
 def direct_mismatch_ids(target, mode):
+    validation_scope = state.active_record(target).get("validation_scope")
+    if isinstance(validation_scope, list):
+        return state.direct_mismatch_ids(target).intersection(validation_scope)
     selected = None
     if mode == "incremental":
         decision = state.read_json(state.control_dir(target) / "incremental_decision.json", {})
@@ -32,13 +35,21 @@ def selected_functions(target):
 
 def selection_ready(target):
     decision = state.read_json(state.control_dir(target) / "incremental_decision.json", {})
-    return isinstance(decision.get("included"), dict) and isinstance(decision.get("removed_artifacts"), list)
+    if not isinstance(decision, dict) or decision.get("selection_complete") is not True or decision.get("snapshot_commit") != state.current_snapshot_commit(target) or not isinstance(decision.get("included"), dict) or not isinstance(decision.get("excluded"), dict) or not isinstance(decision.get("removed_artifacts"), list):
+        return False
+    known = {item["id"] for item in state.scoped_functions(target, [])}
+    included, excluded = set(decision["included"]), set(decision["excluded"])
+    return not included.intersection(excluded) and included | excluded == known
 
 
 def baseline_ready(target, submodules):
     active = state.active_record(target)
-    fingerprint = active.get("fingerprint") if isinstance(active, dict) else None
-    return isinstance(fingerprint, str) and state.inspect_baseline(target, fingerprint, submodules).get("valid", False)
+    config = dict(active.get("inputs", {}).get("config", {}))
+    config.pop("incremental_intent", None)
+    fingerprint, _ = state.fingerprint_for_config(target, config)
+    receipt = state.read_json(state.control_dir(target) / "baseline_validation.json", {})
+    baseline = state.read_json(state.skill_dir(target) / "baseline.json", {})
+    return isinstance(receipt, dict) and set(receipt) == {"schema_version", "snapshot_commit", "config_fingerprint", "baseline"} and receipt.get("schema_version") == 1 and receipt.get("snapshot_commit") == state.current_snapshot_commit(target) and receipt.get("config_fingerprint") == fingerprint and receipt.get("baseline") == baseline and baseline.get("baseline_commit") == state.baseline_commit(target)
 
 
 def bug_validation_current(target, mode):
@@ -50,7 +61,19 @@ def bug_validation_current(target, mode):
     plan_ok, plan_reason = state.semantic_job_plan_ready(target, "bug_validation", candidate_ids=candidates)
     if not plan_ok:
         return False, plan_reason
-    return (True, "") if not candidates else state.bug_validation_ready(target, candidates)
+    if state.active_record(target).get("validation_scope"):
+        try:
+            for candidate in candidates:
+                state.accepted_candidate(target, candidate)
+        except (ValueError, OSError, RuntimeError) as exc:
+            return False, str(exc)
+        return True, ""
+    try:
+        from bug_summary import write_summary
+        write_summary(target, mode)
+    except (ValueError, OSError, RuntimeError) as exc:
+        return False, str(exc)
+    return True, ""
 
 
 def call_graph_ready(target):
@@ -90,16 +113,21 @@ def validate(target, mode, phase, submodules):
             state.verification_coverage_ready(target, scoped),
         ),
         "bug_validation": lambda: bug_validation_current(target, mode),
-        "finalize": lambda: True,
+        "finalize": lambda: all_ready(
+            state.function_artifacts_ready(target, scoped, submodules),
+            state.verification_coverage_ready(target, scoped),
+            state.bug_validation_ready(target, state.direct_mismatch_ids(target)),
+        ),
         "validate_baseline": lambda: baseline_ready(target, submodules),
         "refresh_plan": lambda: state.phases_schema_ready(target)[0],
         "preserve_specs": lambda: (state.control_dir(target) / "preserved_specs.json").is_file(),
         "diff": lambda: (state.control_dir(target) / "diff.json").is_file(),
         "rebuild_graph": lambda: call_graph_ready(target),
         "select_scope": lambda: selection_ready(target),
-        "update_specs": lambda: all_ready(state.specification_context_ready(target), state.specification_artifacts_ready(target, scoped, submodules), ((fm / "incremental_updated_specs.json").is_file(), "missing incremental specification update record")),
+        "update_specs": lambda: all_ready(state.specification_context_ready(target), state.specification_artifacts_ready(target, scoped, submodules), (state.read_json(fm / "incremental_updated_specs.json", {}).get("update_complete") is True, "incremental specification propagation is incomplete")),
         "verify_affected": lambda: all_ready(
             (selection_ready(target), "missing incremental selection"),
+            (state.read_json(fm / "incremental_updated_specs.json", {}).get("update_complete") is True, "incremental contracts are not settled for verification"),
             state.semantic_job_plan_ready(target, "verify_affected", selected),
             state.selected_verification_ready(target, selected),
             state.verification_coverage_ready(target, selected) if selected else (True, ""),

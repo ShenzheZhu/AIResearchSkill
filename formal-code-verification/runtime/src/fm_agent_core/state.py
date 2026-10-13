@@ -17,6 +17,7 @@ import re
 import subprocess
 
 from .languages import source_extensions
+from . import loop_evidence
 
 
 # Language recognition is centralised in languages.py.  External-plugin
@@ -27,7 +28,7 @@ METADATA_SIDECAR_SUFFIXES = (".spec.json", ".info.json")
 VERDICTS = {"MATCH", "MISMATCH", "DEPENDENCY_RISK", "INCONCLUSIVE", "ERROR"}
 VERIFICATION_FIELDS = {
     "schema_version", "function_id", "snapshot_commit", "verdict",
-    "reasoning", "gaps", "error",
+    "reasoning", "gaps", "error", "reasoning_complete", "candidates", "loop_evidence",
 }
 POSTCONDITION_REASONING_FIELDS = {
     "actual_postcondition", "spec_postcondition", "counterexample",
@@ -60,7 +61,7 @@ def now() -> str:
 def read_json(path: Path, fallback):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return fallback
 
 
@@ -556,12 +557,13 @@ def semantic_job_plan_ready(project: Path, phase: str, functions: list[dict] | N
     if not isinstance(entries, list) or plan.get("total_entries") != len(entries) or not isinstance(plan.get("created_jobs"), int):
         return False, f"invalid deterministic job plan counts for {phase}"
     artifact_phases = {"specification", "verification", "verify_affected"}
-    identity_key = "artifact" if phase in artifact_phases else "function_id"
+    identity_key = "artifact" if phase in artifact_phases else "candidate_id"
     expected = ({item.get("artifact") for item in functions or []} if identity_key == "artifact" else set(candidate_ids or set()))
     actual = set()
     expected_types = {"spec_batch"} if phase == "specification" else {"verify_function", "verify_batch"} if phase in {"verification", "verify_affected"} else {"bug_validate"}
     for entry in entries:
-        if not isinstance(entry, dict) or set(entry) != {identity_key, "job_id"} or not isinstance(entry.get(identity_key), str):
+        fields = {identity_key, "job_id"} if identity_key == "artifact" else {"candidate_id", "function_id", "job_id"}
+        if not isinstance(entry, dict) or set(entry) != fields or not isinstance(entry.get(identity_key), str):
             return False, f"invalid entry in deterministic job plan for {phase}"
         identity, job_id = entry[identity_key], entry["job_id"]
         if identity in actual or job_id is not None and not isinstance(job_id, str):
@@ -572,10 +574,17 @@ def semantic_job_plan_ready(project: Path, phase: str, functions: list[dict] | N
         job = read_json(skill_dir(project) / "jobs" / f"{job_id}.json", None)
         if not isinstance(job, dict) or job.get("id") != job_id or job.get("phase") != phase or job.get("type") not in expected_types:
             return False, f"job plan references an invalid job: {job_id}"
+        import scheduler
+        try:
+            origin = scheduler.accepted_origin(project, job_id)
+        except (ValueError, OSError, RuntimeError) as exc:
+            return False, str(exc)
+        if origin != {"snapshot_commit": current_snapshot_commit(project), "input_fingerprint": active_record(project).get("fingerprint", "")}:
+            return False, f"job plan references another run: {job_id}"
         if identity_key == "artifact" and identity not in job.get("artifacts", []) and identity not in job.get("completed_artifacts", []):
             return False, f"job {job_id} does not own planned artifact {identity}"
-        if identity_key == "function_id" and job.get("input", {}).get("function_id") != identity:
-            return False, f"job {job_id} does not own planned function {identity}"
+        if identity_key == "candidate_id" and (job.get("input", {}).get("candidate_id") != identity or job.get("input", {}).get("function_id") != entry["function_id"]):
+            return False, f"job {job_id} does not own planned candidate {identity}"
     if actual != expected:
         return False, f"deterministic job plan for {phase} does not cover the current scope"
     return True, ""
@@ -599,7 +608,7 @@ def _postcondition_reasoning_ready(artifact: Path, spec: dict, reasoning, mismat
         return False, "reasoning reason must be a bounded string"
     if mismatch:
         if not all(_nonempty_text(value) for value in (counterexample, statements, reason)):
-            return False, "MISMATCH requires a concrete counterexample, exact offending statements, and reason"
+            return False, "MISMATCH requires counterexample, exact offending statements, and reason as non-empty strings"
         source = artifact.read_text(encoding="utf-8", errors="replace")
         if statements not in source:
             return False, "MISMATCH offending statements are not an exact quote from the extracted function"
@@ -615,18 +624,48 @@ def verification_result_ready(project: Path, artifact: Path, function_id: str, r
     sidecars_ok, sidecars_reason = sidecars_ready(artifact)
     if not sidecars_ok:
         return False, f"verification input is invalid: {sidecars_reason}"
-    if not isinstance(result, dict) or set(result) != VERIFICATION_FIELDS or result.get("schema_version") != 2:
-        return False, "verification result does not match schema version 2"
+    if not isinstance(result, dict) or set(result) != VERIFICATION_FIELDS or result.get("schema_version") != 3:
+        return False, "verification result does not match schema version 3"
     if result.get("function_id") != function_id:
         return False, "verification function identity mismatch"
-    if result.get("snapshot_commit") != (snapshot_commit or current_snapshot_commit(project)):
-        return False, "verification snapshot mismatch"
+    target_snapshot = snapshot_commit or current_snapshot_commit(project)
+    if result.get("snapshot_commit") != target_snapshot:
+        retained = retained_function(project, function_id, target_snapshot)
+        if retained is None or retained["verification_snapshot_commit"] != result.get("snapshot_commit"):
+            return False, "verification snapshot mismatch without qualified origin"
     verdict = result.get("verdict")
     if verdict not in VERDICTS:
         return False, "verification verdict is invalid"
     spec = read_json(Path(f"{artifact}.spec.json"), None)
     basis = spec_contract_basis(artifact)
+    candidates = result.get("candidates")
+    if not isinstance(candidates, list) or not isinstance(result.get("reasoning_complete"), bool) or not isinstance(result.get("loop_evidence"), list):
+        return False, "verification requires explicit completion, candidates and loop evidence"
+    if verdict not in {"MATCH", "MISMATCH"} and (candidates or result["reasoning_complete"] or result["loop_evidence"]):
+        return False, "incomplete reasoning cannot claim conclusive candidates or loop proofs"
     if verdict in {"MATCH", "MISMATCH"}:
+        if not result["reasoning_complete"]:
+            return False, "partial function reasoning is not complete"
+        loops_ok, loops_reason = loop_evidence.ready(artifact, result["loop_evidence"])
+        if not loops_ok:
+            return False, loops_reason
+        if verdict == "MATCH" and candidates or verdict == "MISMATCH" and not candidates:
+            return False, "direct candidate count disagrees with the function verdict"
+        config = active_record(project).get("inputs", {}).get("config", {})
+        if not config:
+            config = read_json(skill_dir(project) / "config.json", {})
+        if not config.get("all_bugs", False) and len(candidates) > 1:
+            return False, "multiple candidates require all-bugs reasoning mode"
+        if len({json.dumps(candidate.get("reasoning"), sort_keys=True) for candidate in candidates if isinstance(candidate, dict)}) != len(candidates):
+            return False, "duplicate reasoning is not an independent candidate"
+        for ordinal, candidate in enumerate(candidates, 1):
+            if not isinstance(candidate, dict) or set(candidate) != {"candidate_id", "reasoning"} or candidate.get("candidate_id") != candidate_id(function_id, ordinal):
+                return False, "direct candidate identity must match its function and ordinal"
+            candidate_ok, candidate_reason = _postcondition_reasoning_ready(artifact, spec, candidate["reasoning"], True)
+            if not candidate_ok:
+                return False, candidate_reason
+        if candidates and result.get("reasoning") != candidates[0]["reasoning"]:
+            return False, "primary mismatch must describe its first independent candidate"
         if basis not in {"normative", "inferred"}:
             return False, f"unavailable specification contract cannot establish {verdict}"
         if result.get("gaps") is not None or result.get("error") is not None:
@@ -748,10 +787,14 @@ def verification_coverage_ready(project: Path, functions: list[dict]) -> tuple[b
     return True, ""
 
 
-def direct_mismatch_ids(project: Path, selected_ids: set[str] | None = None) -> set[str]:
-    """Return current, schema-valid normative or inferred direct candidates."""
+def candidate_id(function_id: str, ordinal: int = 1) -> str:
+    return f"{function_id}::bug-{ordinal:03d}"
+
+
+def direct_candidates(project: Path, selected_ids: set[str] | None = None, *, snapshot_commit: str | None = None) -> dict[str, dict]:
+    """Return each independently reasoned candidate with its real function identity."""
     results = fm_dir(project) / "logic_verification_results"
-    found = set()
+    found = {}
     for item in (source_index(project) or {}).get("functions", []):
         function_id = item.get("id") if isinstance(item, dict) else None
         rel = item.get("artifact") if isinstance(item, dict) else None
@@ -759,10 +802,90 @@ def direct_mismatch_ids(project: Path, selected_ids: set[str] | None = None) -> 
             continue
         artifact = fm_dir(project) / "extracted_functions" / rel
         result = read_json(results / Path(rel).with_suffix(".json"), {})
-        valid, _ = verification_result_ready(project, artifact, function_id, result)
+        valid, _ = verification_result_ready(project, artifact, function_id, result, snapshot_commit)
         if valid and result.get("verdict") == "MISMATCH":
-            found.add(function_id)
+            for candidate in result["candidates"]:
+                found[candidate["candidate_id"]] = {**candidate, "function_id": function_id, "artifact": rel, "snapshot_commit": result["snapshot_commit"]}
     return found
+
+
+def direct_mismatch_ids(project: Path, selected_ids: set[str] | None = None) -> set[str]:
+    return set(direct_candidates(project, selected_ids))
+
+
+def retained_function(project: Path, function_id: str, target_snapshot: str | None = None) -> dict | None:
+    """Qualify unchanged inputs against the actual originating Git tree."""
+    target_snapshot = target_snapshot or current_snapshot_commit(project)
+    manifest = read_json(control_dir(project) / "retained_evidence.json", {})
+    if not isinstance(manifest, dict) or set(manifest) != {"schema_version", "snapshot_commit", "functions"} or manifest.get("schema_version") != 1 or manifest.get("snapshot_commit") != target_snapshot or not isinstance(manifest.get("functions"), dict):
+        return None
+    row = manifest["functions"].get(function_id)
+    fields = {"artifact", "source_path", "source_blob", "spec", "info", "verification_snapshot_commit", "verification_bytes", "bug_validations"}
+    if not isinstance(row, dict) or set(row) != fields or not isinstance(row.get("bug_validations"), list):
+        return None
+    item = next((entry for entry in (source_index(project) or {}).get("functions", []) if isinstance(entry, dict) and entry.get("id") == function_id), None)
+    if not isinstance(item, dict) or row["artifact"] != item.get("artifact") or row["source_path"] != item.get("path"):
+        return None
+    if not all(isinstance(row.get(key), str) and row[key] for key in ("artifact", "source_path", "source_blob", "verification_snapshot_commit")):
+        return None
+    artifact = fm_dir(project) / "extracted_functions" / row["artifact"]
+    result_path = fm_dir(project) / "logic_verification_results" / Path(row["artifact"]).with_suffix(".json")
+    if not isinstance(row["verification_bytes"], str) or not result_path.is_file() or result_path.read_bytes() != row["verification_bytes"].encode("utf-8") or read_json(result_path, {}).get("snapshot_commit") != row["verification_snapshot_commit"]:
+        return None
+    if row["spec"] != read_json(Path(f"{artifact}.spec.json"), None) or row["info"] != read_json(Path(f"{artifact}.info.json"), None):
+        return None
+    source_path = row["source_path"]
+    origin = row["verification_snapshot_commit"]
+    if any(git(project, "rev-parse", f"{commit}:{source_path}", check=False) != row["source_blob"] for commit in (origin, target_snapshot)):
+        return None
+    lines = git(project, "show", f"{origin}:{source_path}", check=False).splitlines()
+    start, end = item.get("line_start"), item.get("line_end")
+    source = artifact.read_text(encoding="utf-8", errors="replace").rstrip("\r\n")
+    if not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start or not source or source not in "\n".join(lines[start - 1:end]):
+        return None
+    return row
+
+
+def accepted_candidate(project: Path, candidate: str, target_snapshot: str | None = None) -> dict:
+    """Resolve exact current or retained durable authority for one candidate."""
+    import scheduler
+    explicit_snapshot = target_snapshot is not None
+    target_snapshot = target_snapshot or current_snapshot_commit(project)
+    function_id = candidate.rsplit("::bug-", 1)[0] if isinstance(candidate, str) else ""
+    current = direct_candidates(project, {function_id}, snapshot_commit=target_snapshot).get(candidate)
+    if current is None:
+        raise ValueError(f"candidate is not a qualified current mismatch: {candidate}")
+    plan = read_json(control_dir(project) / "job_plans" / "bug_validation.json", {})
+    entry = None
+    if plan.get("schema_version") == 1 and plan.get("snapshot_commit") == target_snapshot:
+        entry = next((value for value in plan.get("entries", []) if isinstance(value, dict) and value.get("candidate_id") == candidate), None)
+    fingerprint = active_record(project).get("fingerprint", "")
+    origin_snapshot = target_snapshot
+    if isinstance(entry, dict) and isinstance(entry.get("job_id"), str):
+        identity = scheduler.accepted_origin(project, entry["job_id"])
+        baseline = read_json(skill_dir(project) / "baseline.json", {})
+        baseline_origin = {"snapshot_commit": baseline.get("baseline_commit"), "input_fingerprint": baseline.get("run_fingerprint", baseline.get("fingerprint"))}
+        if identity != {"snapshot_commit": target_snapshot, "input_fingerprint": fingerprint}:
+            if explicit_snapshot and identity == baseline_origin and target_snapshot == baseline.get("baseline_commit"):
+                fingerprint = identity["input_fingerprint"]
+            else:
+                entry = None
+    if entry is None:
+        retained = retained_function(project, current["function_id"], target_snapshot)
+        if retained is not None:
+            entry = next((value for value in retained["bug_validations"] if isinstance(value, dict) and value.get("candidate_id") == candidate), None)
+        fields = {"candidate_id", "job_id", "snapshot_commit", "input_fingerprint", "result_path"}
+        if not isinstance(entry, dict) or set(entry) != fields:
+            raise ValueError(f"candidate has no accepted current or qualified retained job: {candidate}")
+        fingerprint, origin_snapshot = entry["input_fingerprint"], entry["snapshot_commit"]
+    if not isinstance(entry, dict) or not isinstance(entry.get("job_id"), str):
+        raise ValueError(f"candidate has no accepted job: {candidate}")
+    job = scheduler.accepted_job(project, entry["job_id"], snapshot_commit=origin_snapshot, input_fingerprint=fingerprint)
+    if job.get("input", {}).get("candidate_id") != candidate or job.get("input", {}).get("function_id") != current["function_id"]:
+        raise ValueError("accepted job belongs to another candidate or function")
+    if "result_path" in entry and job["bug_result_path"] != entry["result_path"]:
+        raise ValueError("retained report path differs from its accepted job")
+    return job
 
 
 def _project_relative(project: Path, value) -> Path | None:
@@ -803,28 +926,29 @@ def bug_validation_ready(project: Path, candidate_ids: set[str]) -> tuple[bool, 
     if not isinstance(summary, dict):
         return False, "missing or invalid bug validation summary"
     reports: dict[str, dict] = {}
-    for path in root.glob("*.result.json") if root.is_dir() else []:
-        report = read_json(path, None)
-        function_id = report.get("function_id") if isinstance(report, dict) else None
-        if not isinstance(function_id, str) or function_id in reports:
-            return False, "bug validation report has missing or duplicate function identity"
-        reports[function_id] = report
-    missing = candidate_ids - set(reports)
-    extra = set(reports) - candidate_ids
-    if missing or extra:
-        return False, "bug validation reports do not match current direct MISMATCH candidates"
+    for identity in candidate_ids:
+        try:
+            job = accepted_candidate(project, identity)
+        except (ValueError, OSError, RuntimeError) as exc:
+            return False, str(exc)
+        reports[identity] = read_json(project / job["bug_result_path"], {})
     snapshot = current_snapshot_commit(project)
     if summary.get("snapshot_commit") != snapshot or summary.get("total_candidates") != len(candidate_ids):
         return False, "bug validation summary does not match the current snapshot or candidate count"
     counts = {"confirmed": 0, "rejected": 0, "inconclusive": 0}
     for function_id, report in reports.items():
-        if report.get("snapshot_commit") != snapshot or report.get("confirmation_status") not in BUG_FINAL_STATUSES:
+        try:
+            job = accepted_candidate(project, function_id)
+        except (ValueError, OSError, RuntimeError) as exc:
+            return False, str(exc)
+        if report != read_json(project / job["bug_result_path"], None) or report.get("confirmation_status") not in BUG_FINAL_STATUSES:
             return False, f"bug validation report is invalid for {function_id}"
+        origin_snapshot = report.get("snapshot_commit")
         attempts = report.get("attempts")
         if not isinstance(attempts, list) or not attempts:
             return False, f"bug validation report has no attempts for {function_id}"
         for attempt in attempts:
-            ok, reason = _dynamic_attempt_ready(project, attempt, snapshot)
+            ok, reason = _dynamic_attempt_ready(project, attempt, origin_snapshot)
             if not ok:
                 return False, f"{function_id}: {reason}"
         latest = attempts[-1].get("classification")
@@ -967,6 +1091,12 @@ def inspect_baseline(project: Path, config_fingerprint: str, submodules: list[st
     ready, reason = function_artifacts_ready(project, functions, snapshot_commit=commit)
     if not ready:
         return {"valid": False, "reason": reason}
+    candidates = direct_candidates(project, snapshot_commit=commit)
+    for identity in candidates:
+        try:
+            accepted_candidate(project, identity, commit)
+        except (ValueError, OSError, RuntimeError) as exc:
+            return {"valid": False, "reason": str(exc)}
     layers_ready, layers_reason = phase_layers_ready(project)
     if not layers_ready:
         return {"valid": False, "reason": layers_reason}
