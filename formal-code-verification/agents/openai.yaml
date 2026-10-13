@@ -1,0 +1,4 @@
+interface:
+  display_name: "Formal Code Verification"
+  short_description: "Check invariants, reproduce bugs, refine models"
+  default_prompt: "Use $formal-code-verification to verify this code against explicit behavior requirements, reproduce counterexamples, and refine the model without weakening the requirements."

@@ -1,6 +1,6 @@
 ---
 name: ai-research-skill-router
-description: Route AI research and engineering tasks to the right workflow skill. Use for OpenReview submissions, reviewer rebuttals, validation studies, LaTeX page reduction, GitHub publishing, API-first web automation, and general software-development discipline.
+description: Route AI research and engineering tasks to the right workflow skill. Use for OpenReview submissions, reviewer rebuttals, validation studies, LaTeX page reduction, GitHub publishing, API-first web automation, specification-driven code verification, and general software-development discipline.
 ---
 
 # AI Research Skill Router
@@ -10,7 +10,7 @@ Use this as the umbrella skill for AI research operations. It routes to the focu
 ## Routing Workflow
 
 1. Classify the task.
-   Identify whether the user needs submission automation, rebuttal writing, validation experiments, Prolific studies, LaTeX page reduction, GitHub publishing, web automation, or software-development workflow.
+   Identify whether the user needs submission automation, rebuttal writing, validation experiments, Prolific studies, LaTeX page reduction, GitHub publishing, web automation, formal code verification, or software-development workflow.
 
 2. Pick one primary skill.
    Read the selected child skill folder `SKILL.md` first. Follow its workflow as the main procedure.
@@ -35,6 +35,7 @@ Use this as the umbrella skill for AI research operations. It routes to the focu
 | LaTeX page reduction | `latex-page-reduction/SKILL.md` | Reduce a conference paper to a strict page limit without changing scientific claims. |
 | GitHub repo creation or push | `auto-github/SKILL.md` | Initialize git, create a GitHub repository, attach remotes, commit, and push safely. |
 | Website task or dashboard automation | `api-first-web-automation/SKILL.md` | Search for APIs, docs, direct URLs, and stable endpoints before browser automation. |
+| Formal code verification | `formal-code-verification/SKILL.md` | Check code against explicit behavioral properties, reproduce counterexamples, refine models, and distinguish tests/model checks from source proofs. |
 | Software development process | `software-development-discipline/SKILL.md` | Keep non-trivial software work scoped, traceable, verified, and reviewable across issues, PRs, CI, release trains, regressions, and subagents. |
 
 ## Common Combinations
@@ -61,4 +62,5 @@ Use this as the umbrella skill for AI research operations. It routes to the focu
 - `latex-page-reduction/`: LaTeX page-limit reduction rules.
 - `auto-github/`: GitHub repo creation and publishing workflow.
 - `api-first-web-automation/`: API-first approach before browser automation.
+- `formal-code-verification/`: specification-driven validation, counterexample-guided refinement and evidence limits.
 - `software-development-discipline/`: general software-development workflow discipline.
