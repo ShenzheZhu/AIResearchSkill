@@ -81,3 +81,5 @@ To repeat this pattern on another repository, use the same orchestrator and phas
 ```
 
 Resume is used only after an actual interruption; inspect is used after completion. These commands dispatch native work, not an unattended external-provider runner. This Python calibration does not establish native incremental acceptance for every other language, complex cycle or integration environment; caller/callee propagation also has separate deterministic regressions.
+
+Subsequent native repository execution exposed two dispatch gaps: retryable jobs were not requeued, and preparation could not read accepted prior probe observations. The runtime now requeues within the existing budgets and exposes only same-run, same-candidate evidence whose accepted receipt and saved bytes still match. Public-program dependency loading is permitted during reproduction without granting direct dependency/test inspection. Independent review added a same-snapshot changed-requirements regression; the updated deterministic suite passes 127 checks. These later checks do not relabel the earlier native calibration or prove every host environment compatible.

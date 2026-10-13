@@ -10,6 +10,11 @@ modify business source, specifications, scheduler state, or spawn agents.
 Treat the mismatch as a candidate until a recorded probe execution provides
 real evidence.
 
+`read_paths` bounds direct file inspection. Executing the declared public
+entry point may load its unchanged local runtime dependencies, including
+vendored dependencies, during an isolated reproduction. This does not permit
+direct inspection of dependency source or reading tests, fixtures, or solutions.
+
 Modified by AIResearchSkill: use the final probe's first-line outcome and retain
 unavailable attempts when the negative retry budget ends.
 
@@ -22,6 +27,10 @@ Treat the ticket's `candidate_reasoning` fields as the candidate oracle: `spec_p
 `counterexample` plus `offending_statements` identify the trigger. Reject a
 candidate that lacks these validated fields. Find the smallest public entry
 point that can reach the candidate. Do not import internal implementation files directly.
+On retries, use the ticket's `validated_attempts` and their permitted prior
+contracts, probes and execution results to improve the next probe. These are
+accepted observations for this candidate, not a new oracle or current execution.
+Preserve their original ordinals and evidence paths; never rewrite them.
 Write only inside the assigned immutable attempt directory:
 
 ```text

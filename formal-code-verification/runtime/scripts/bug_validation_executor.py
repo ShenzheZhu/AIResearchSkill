@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -26,6 +27,61 @@ from reproduction_runner import attempt_dir, output_classification, read_contrac
 
 
 EXECUTION_MODES = {"agent-executed", "adapter"}
+
+
+def accepted_attempt_read_paths(target: Path, job: dict) -> set[str]:
+    """Expose only sealed evidence for this job's accepted semantic attempts."""
+    history = job.get("validated_attempts", [])
+    if not history:
+        return set()
+    snapshot = state.current_snapshot_commit(target)
+    try:
+        record = state.active_record(target)
+        origin = scheduler.accepted_origin(target, job["id"])
+        if origin["snapshot_commit"] != snapshot or origin != {
+            "snapshot_commit": record.get("snapshot_commit") or snapshot,
+            "input_fingerprint": record.get("fingerprint", ""),
+        }:
+            raise ValueError("prior Bug Validator attempts belong to another analysis run")
+        with sqlite3.connect(f"{scheduler.checkpoint.db_path(target).resolve().as_uri()}?mode=ro", uri=True) as connection:
+            receipts = {
+                ordinal: json.loads(payload) for ordinal, payload in connection.execute(
+                    "SELECT p.attempt,p.payload_json FROM receipts p JOIN attempts a ON a.job_id=p.job_id AND a.attempt=p.attempt "
+                    "WHERE p.job_id=? AND p.input_hash=? AND a.input_hash=p.input_hash AND a.status='succeeded'",
+                    (job["id"], job["input_hash"]),
+                )
+            }
+            sealed = {path: (digest, size) for path, digest, size in connection.execute(
+                "SELECT path,sha256,size FROM artifacts WHERE job_id=? AND snapshot_commit=?",
+                (job["id"], snapshot),
+            )}
+    except sqlite3.Error as exc:
+        raise ValueError(f"accepted prior Bug Validator evidence unavailable: {exc}") from exc
+    bug_id, _ = context(job)
+    reads = set()
+    for recorded in history:
+        ordinal = recorded["ordinal"]
+        receipt = {
+            "job_id": job["id"], "status": "completed", "outputs": list(job["required_outputs"]),
+            "classification": recorded["classification"],
+        }
+        root = attempt_dir(target, bug_id, ordinal)
+        result_path = (root / "reproduction_result.json").relative_to(target).as_posix()
+        if not 0 < ordinal < job["attempts"] or receipts.get(ordinal) != receipt or recorded.get("dynamic_evidence") != {"reproduction_result": result_path}:
+            raise ValueError("prior Bug Validator attempt has no matching accepted receipt")
+        prior_job = {**job, "attempts": ordinal}
+        if not execution_result_valid(target, prior_job, snapshot_commit=snapshot):
+            raise ValueError("prior Bug Validator attempt has invalid execution evidence")
+        result = state.read_json(target / result_path, {})
+        _, contract = read_contract(target, bug_id, ordinal, result.get("execution_mode", "adapter"), snapshot_commit=snapshot)
+        paths = {result_path, (root / "reproduction.json").relative_to(target).as_posix(), (root / contract["probe_file"]).relative_to(target).as_posix()}
+        paths.update((root / name).relative_to(target).as_posix() for name in ("build_profile.json", "build_result.json") if (root / name).relative_to(target).as_posix() in sealed)
+        for relative in paths:
+            path = target / relative
+            if relative not in sealed or not path.is_file() or (state.file_hash(path), path.stat().st_size) != sealed[relative]:
+                raise ValueError("previously accepted dynamic evidence bytes have changed")
+        reads.update(paths)
+    return reads
 
 
 def load_job(target: Path, job_id: str) -> dict:
@@ -87,6 +143,7 @@ def worker_request(target: Path, job: dict, pass_name: str, host: str = "auto") 
             raise ValueError("Bug Validator preparation is missing assigned source or verification evidence")
         if candidate is None or candidate["function_id"] != function_id:
             raise ValueError("Bug Validator preparation requires its assigned validated direct candidate")
+        reads.update(accepted_attempt_read_paths(target, job))
         language = item["language"]
         public_entrypoint = None
     else:
@@ -156,6 +213,7 @@ def worker_request(target: Path, job: dict, pass_name: str, host: str = "auto") 
         "mode": mode,
         "bug_id": bug_id,
         "attempt": attempt,
+        "validated_attempts": job.get("validated_attempts", []),
         "attempt_dir": root,
         "read_paths": sorted(path for path in reads if (target / path).is_file()),
         "write_paths": writes,
@@ -163,7 +221,9 @@ def worker_request(target: Path, job: dict, pass_name: str, host: str = "auto") 
         "rule": (
             "Invoke this only through the active Codex/Claude host worker mechanism; do not run FM-Agent."
             if pass_name != "execution" else
-            "Invoke this through the active host worker mechanism. The Worker may run project-scoped reproduction commands and must persist their exact evidence."
+            "Invoke this through the active host worker mechanism. The Worker may run project-scoped reproduction commands and must persist their exact evidence. "
+            "read_paths bounds direct inspection; the declared public entry point may load unchanged local runtime dependencies, including vendored dependencies, during reproduction. "
+            "Dependency execution does not permit direct source inspection or test/solution reads."
         ),
     }
     path = state.control_dir(target) / "dispatches" / f"{job['id']}-attempt-{attempt:03d}-{pass_name}.json"
