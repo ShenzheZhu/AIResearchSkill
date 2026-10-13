@@ -37,6 +37,8 @@ Current verification format separates a function from its direct candidates. `re
 
 Bug Validation planning, tickets, commands, finalization, gates, reports and ledger entries bind both `candidate_id` and the actual `function_id`. One confirmed candidate cannot confirm another. Confirmation, rejection and unavailable execution remain separate outcomes. Partial MATCH/MISMATCH results and pending candidates block completion; accepted INCONCLUSIVE/DEPENDENCY_RISK results remain explicit gaps. Multiple probes for one candidate do not increase the number of independent defects.
 
+The phase driver's next action requeues current-run retryable jobs through the existing scheduler transition before dispatch. A rejected batch retains its valid siblings and repairs only invalid outputs; retries retain accepted attempt history, live leases and the existing runtime/negative budgets. Exhausted jobs remain terminal failures.
+
 ## Explicit loop obligations
 
 Conclusive reasoning must account for each parser-identified loop in its owning callable, including supported comprehension iterations. Record the invariant, why P establishes it, why a body iteration preserves it, and why normal termination implies the loop's required postcondition. Give separate arguments for relevant break/continue/return/throw paths. Nested callable bodies belong to their own verification.

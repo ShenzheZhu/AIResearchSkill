@@ -95,6 +95,10 @@ def next_actions(target: Path, limit: int, offset: int = 0, turn_budget_remainin
     # though ready work remained. Keep the argument for CLI compatibility,
     # but never convert an ordinary low-context signal into a halted run.
     _ = turn_budget_remaining
+    for phase in state.active_record(target).get("phases", []):
+        for job in scheduler.current_jobs_for_phase(target, phase):
+            if job.get("status") == "retryable":
+                scheduler.transition(target, job["id"], "retry", None, None, "execution")
     finalizations = scheduler.admissible_bug_validation_finalizations(target, limit=limit)
     capacity_after_finalizations = scheduler._capacity(target)["active"] + len(finalizations)
     primary_budget = max(0, min(limit - len(finalizations), scheduler._caps(target)["max_active_subagents"] - capacity_after_finalizations))
