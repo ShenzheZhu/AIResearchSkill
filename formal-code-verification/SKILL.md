@@ -43,6 +43,8 @@ The method follows `{P} C {Q}`: derive intended P/Q independently, propagate ass
 
 This workflow is project independent. Check the actual extraction/execution capabilities of the target environment; a language profile, supplied source span or passing example does not establish compatibility for another language, flow or repository. Preserve missing parsers, unsupported source forms and unavailable integration/verifier environments as gaps. Every qualified coverage row must refer to the exact requirement and execution it actually checks.
 
+Select one available Python 3.10+ interpreter and parser environment at preflight, and use it consistently for the run. Do not assume a previous session's temporary parser installation exists or switch interpreters after a parser failure; report the missing capability explicitly.
+
 The runtime keeps local analysis artifacts and continuation state; it does not modify product source or introduce product execution routing. Its LLM reasoning is not a sound machine-checked proof. Report the selected scope, normative assumptions, actual dynamic results and uncovered boundaries.
 
 For a repeatable public-repository example, read [references/public-case.md](references/public-case.md). For source provenance and packaging changes, read [UPSTREAM.md](UPSTREAM.md).

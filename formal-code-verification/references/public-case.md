@@ -56,6 +56,8 @@ Evaluate independent discovery separately: have the agent derive P/Q/I and actua
 
 ## Observed Codex pipeline run: 2026-10-13
 
+This observed run used the earlier single-candidate verification format. It is historical acceptance evidence, not a forward test of the newer incremental, multi-candidate or loop-evidence schema. Preserve its original artifacts; a new format requires a fresh compatible analysis.
+
 The packaged runtime completed all nine full-analysis stages on the 13 selected functions using only current Codex/native Workers. Specification and implementation Workers received the neutral source and assigned artifacts, without this answer key, upstream issues or fixed-source controls.
 
 | Result | Count | Interpretation |

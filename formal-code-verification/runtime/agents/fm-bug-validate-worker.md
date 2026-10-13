@@ -102,6 +102,8 @@ Never use or create a project-root `build/`, `target/`, `node_modules/`,
 `.gradle/`, or equivalent shared output. Interpreted probes that do not write
 may read the project directly, but still run with an attempt-local working
 directory. Do not claim a command ran unless its observed output is recorded.
+Every recorded command, including initial mkdir/copy setup, must use the
+existing attempt directory or its workspace as cwd, never the project root.
 Record setup/build commands first and the actual probe command last. Only the
 last command's stdout supplies the probe's exact first-line marker; any nonzero
 command exit remains an execution failure.
