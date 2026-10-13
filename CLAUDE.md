@@ -36,7 +36,7 @@ Use this repository as a cross-agent toolkit.
   delegation, or release-train judgment.
 
 - `formal-code-verification/`
-  Use for specification-driven verification and counterexample-guided debugging. Ground requirements independently, run actual repros, and distinguish model/proof limits.
+  Use in Codex for the bundled official FM-Agent pipeline: caller-grounded Hoare specifications, implementation reasoning, actual-code bug validation and a final evidence report. It uses current Codex subagents, with no external model provider.
 
 ## Operating Rule
 

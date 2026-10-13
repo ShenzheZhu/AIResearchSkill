@@ -1,4 +1,4 @@
 interface:
-  display_name: "Formal Code Verification"
-  short_description: "Check invariants, reproduce bugs, refine models"
-  default_prompt: "Use $formal-code-verification to verify this code against explicit behavior requirements, reproduce counterexamples, and refine the model without weakening the requirements."
+  display_name: "FM-Agent Code Verification"
+  short_description: "Run Hoare reasoning and real-code bug validation"
+  default_prompt: "Use $formal-code-verification to autonomously discover this repository's verification targets and gaps, then run FM-Agent with only current Codex/native subagents: business-grounded Hoare specifications, real-code counterexamples and a deduplicated coverage ledger."

@@ -35,7 +35,7 @@ Use this as the umbrella skill for AI research operations. It routes to the focu
 | LaTeX page reduction | `latex-page-reduction/SKILL.md` | Reduce a conference paper to a strict page limit without changing scientific claims. |
 | GitHub repo creation or push | `auto-github/SKILL.md` | Initialize git, create a GitHub repository, attach remotes, commit, and push safely. |
 | Website task or dashboard automation | `api-first-web-automation/SKILL.md` | Search for APIs, docs, direct URLs, and stable endpoints before browser automation. |
-| Formal code verification | `formal-code-verification/SKILL.md` | Check code against explicit behavioral properties, reproduce counterexamples, refine models, and distinguish tests/model checks from source proofs. |
+| Formal code verification | `formal-code-verification/SKILL.md` | Run the bundled FM-Agent Hoare-style pipeline with current Codex subagents, caller-grounded specifications and real-code counterexample validation. |
 | Software development process | `software-development-discipline/SKILL.md` | Keep non-trivial software work scoped, traceable, verified, and reviewable across issues, PRs, CI, release trains, regressions, and subagents. |
 
 ## Common Combinations
@@ -62,5 +62,5 @@ Use this as the umbrella skill for AI research operations. It routes to the focu
 - `latex-page-reduction/`: LaTeX page-limit reduction rules.
 - `auto-github/`: GitHub repo creation and publishing workflow.
 - `api-first-web-automation/`: API-first approach before browser automation.
-- `formal-code-verification/`: specification-driven validation, counterexample-guided refinement and evidence limits.
+- `formal-code-verification/`: the official FM-Agent host-native runtime, Codex entry and repeatable public-repository case.
 - `software-development-discipline/`: general software-development workflow discipline.
