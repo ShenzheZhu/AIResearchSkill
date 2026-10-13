@@ -1,68 +1,40 @@
 ---
 name: formal-code-verification
-description: Verify a selected function or workflow against explicit preconditions, postconditions and state invariants; use Hoare-style reasoning, formal tools when suitable, and executable counterexamples to find bugs and refine models. Use for formal verification, specification-driven validation or counterexample-guided debugging, rather than ordinary smoke testing.
+description: Autonomously discover verification targets in a repository or change scope, then run FM-Agent's Hoare-style correctness pipeline using current Codex and native subagents. Map business flows, derive caller-grounded specifications, execute counterexamples and track coverage gaps. Use for specification-driven verification, not ordinary smoke testing.
 ---
 
-# Formal Code Verification
+# FM-Agent for Codex
 
-Turn intended behavior into checkable properties, then search for violations in the actual implementation. Use the host agent for reasoning and existing project tools for execution. Natural-language reasoning and passing tests are evidence, not machine-checked proofs.
+Use the bundled [official FM-Agent Skill implementation](runtime/skills/run/instructions.md). This packages its working pipeline rather than replacing it with a review checklist. Read that entry completely, then follow its phase driver, Worker tickets and completion gates, subject to this wrapper's scope below.
 
-For tool choice, proof failures or model refinement, read [references/methods.md](references/methods.md). For cross-module properties and independent test oracles, read [references/examples.md](references/examples.md).
+**All semantic work uses the current Codex session and its native subagents.** Never call an external model provider, ask for an API key, launch a nested Codex/Claude CLI, or fall back to the original remote-model pipeline. Python runs local deterministic tools only.
 
-## Ground the specification
+## Default: discover what needs verification
 
-Trace the requested entry point, its callers, directly relevant callees, state ownership and failure paths. Keep the selected scope; add dependencies only when a property crosses that boundary. Account for indirect calls, callbacks and database/native-worker boundaries where they matter.
+The user only needs to name a repository or change scope. Read [autonomous-discovery.md](references/autonomous-discovery.md) and perform its four steps: map real flows, discover realistic obligations and missing tests, generate independent business-grounded specifications and execute counterexamples, then reconcile the coverage ledger. Do not ask the user to supply a function list or specifications.
 
-Derive desired behavior from explicit requirements, authoritative documentation and caller obligations before using the implementation as an explanation. Label inferred or disputed requirements. A passing existing test or a branch in the implementation is not an independent correctness oracle.
+Use a read-only scout for discovery when useful. It may inventory existing tests; immutable FM-Agent semantic Workers do not read those tests or their solutions. Derive intended behavior from requirements and callers, keep uncertain intent unresolved, and never weaken a postcondition to fit the implementation. Record distinct obligations once, link their evidence, and revisit actual affected consumers after a counterexample or model refinement.
 
-Write a small set of falsifiable obligations:
+Keep the user's source untouched. Prepare an independent external analysis checkout including the requested current working-tree changes, then keep discovery, coverage and runtime artifacts there. Every new audit/batch uses a fresh checkout without copied `fm_agent/` or `fm_agent_skill/` baselines. **This wrapper supports full analysis and resuming an interrupted full run; upstream incremental/no-op scheduling is not supported.** Verify initial inspection selects `full`. Continue an interrupted run in its existing checkout rather than restarting it. Scope new batches to remaining or changed obligations to avoid duplicate verification.
 
-- **P — preconditions:** valid inputs, units, caller guarantees, authority and required state. State assumptions separately; do not exclude valid edge cases to make verification pass.
-- **Q — postconditions:** exact success/result relation, error behavior and permitted effects. Include what must remain unchanged on failure.
-- **I — invariants:** properties preserved across loops, retries, transitions and module boundaries.
+## Packaging and invocation
 
-Prefer predicates over “handles correctly.” State whether ranges are closed/half-open, arithmetic is bounded/overflowing, and text offsets are bytes, UTF-16 units, code points or graphemes. Check that P is satisfiable and includes meaningful valid examples.
+Set `FM_AGENT_SKILL_ROOT` to the absolute `runtime/` directory beside this file. This overrides the upstream location-discovery example: its five embedded skill entries are named `instructions.md` to avoid registering generic `run`, `help` and `config` skills globally. Their relative references and the executable runtime are preserved.
 
-Keep specifications as verification artifacts or tests. Analysis alone does not require new production schemas, runtime registries, execution routing or a coordination framework.
+Take the target Git repository and scope from the user's request. Discover the source directories needed for each batch, including actually affected consumers, and pass them through `--submodule`; the runtime accepts directories, not single-file arguments. Pass distilled requirements through `--knowledge`. Pass `--host codex` to the phase driver and Worker dispatch/claim commands. Use the host's available worker slots; do not request more workers than it can run. No new provider configuration or application dependency is required.
 
-## Derive actual behavior and check it
+Give each Worker its complete ticket and immutable definition, plus the dispatch scope when its manifest lacks scope inputs. Every receipt needs `job_id`, a non-empty `status`, exact `outputs` and a short summary. Submit planning/static-edge receipts through `scheduler.py complete`, specification/verification receipts through `semantic_executor.py submit`, and Bug Validation passes through the executor's returned action.
 
-Independently derive actual behavior **A**, including early exits and relevant callee effects, and compare it with intended **Q** under **P**. Invariant dependencies matter: establish input/state bounds before properties that rely on them; analyze mutually dependent invariants together.
+Example request:
 
-Choose the lightest method that answers the obligation: focused deterministic tests, property/fuzz tests, state-machine exploration, SMT, or a source-language verifier. Reuse the repository harness and dependencies. Avoid duplicating equivalent tests or changing routine CI merely to run this skill.
+```text
+Use $formal-code-verification to autonomously verify /path/to/repo.
+Discover verification targets and omissions, work in risk-based batches,
+reproduce counterexamples and maintain coverage evidence.
+```
 
-When building an abstract model, map each modeled state/transition to actual source and identify omissions. Match language and library semantics; mathematical integers, sequential steps or string lengths may differ from the program. Prefer direct source verification when the supported tool is already available.
+The method follows `{P} C {Q}`: derive intended P/Q independently, propagate assertions through the implementation to obtain actual A, and seek a concrete `P ∧ A ∧ ¬Q` witness. Keep callee dependency risks separate from direct violations. Every direct candidate goes through real-code Bug Validation before being reported as confirmed.
 
-## Counterexample → execution → refinement
+The runtime keeps local analysis artifacts and continuation state; it does not modify product source or introduce product execution routing. Its LLM reasoning is not a sound machine-checked proof. Report the selected scope, normative assumptions, actual dynamic results and uncovered boundaries.
 
-For each failure, record the violated obligation, input/state, relevant trace and source location. Check that state, trace and violation agree; a plausible story is insufficient.
-
-Classify the failure before choosing the next action:
-
-| Observation | Next action |
-|---|---|
-| Reachable actual behavior violates an independently grounded requirement | Run and minimize a reproducer against actual code; report a confirmed bug only after observing the violation. |
-| Model fails but the trace cannot occur in the program | Refine the abstraction using the missing actual constraint; retain the original intended obligation. |
-| Verifier cannot establish a proof obligation | Investigate missing/incorrect invariants, annotations, assumptions or solver limits; a proof failure alone is not a program bug. |
-| Desired behavior is ambiguous or a required dependency cannot be exercised | Record the gap as unresolved and continue independent checks. Do not infer success. |
-
-A loop-induction counterexample can start from an invariant-satisfying state that is unreachable from valid input. It may expose a weak invariant without exposing an executable defect.
-
-Use the smallest faithful reproducer. A test against a simplified mock/model confirms that model only; a production defect needs the actual relevant implementation and boundary. Preserve input/seed, command, expected/actual observation, exit status and output. Infrastructure failure is not a reproduced bug.
-
-Refine from evidence: add missing state, integer/text semantics, failure transitions, authority checks or asynchronous ordering. Explain each change and its source justification. Do not weaken Q, silently strengthen P, suppress assertions, or assume away a failing path. Change a disputed specification only with independently justified intent, with the old and new interpretation recorded.
-
-If proof repair is requested, preserve executable behavior and user-supplied requirements; repair annotations/invariants and rerun the verifier. If bug fixing is authorized, fix the shared cause and retain the minimal failing regression. Verification alone does not authorize product edits, publishing, deployment or data mutation.
-
-## Finish with evidence
-
-Continue within the selected scope and a proportionate time/search budget while new evidence is being produced. Repeated unchanged failures, unavailable tools and exhausted bounds end as explicit gaps, not “no bugs.” Do not expand into repeated whole-repo runs by default.
-
-Report the property, outcome, evidence method, commands/artifacts and remaining assumptions:
-
-- **Confirmed defect:** actual execution violates a grounded obligation.
-- **Checked model:** formal/model checker result, with domain, depth, transitions and abstraction limits.
-- **Proved obligation:** source verifier accepted the obligation; identify covered code, assumptions and trusted/unverified dependencies.
-- **Tested / reasoned / unresolved:** state what actually ran, what was only inspected, and what remains unsupported.
-
-For SMT, check feasibility of preconditions and modeled transitions, including meaningful success/failure cases; distinguish an unsatisfiable violation query from timeout/unknown or a vacuous/inconsistent model. Tests, bounded search and model proofs do not establish whole-product correctness. Finish with the uncovered boundaries and next most useful check.
+For a repeatable public-repository example, read [references/public-case.md](references/public-case.md). For source provenance and packaging changes, read [UPSTREAM.md](UPSTREAM.md).

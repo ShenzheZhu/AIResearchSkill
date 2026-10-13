@@ -1,0 +1,441 @@
+"""Single source of truth for FM-Agent Skill language capabilities.
+
+The Skill intentionally does not import FM-Agent.  This module mirrors only a
+small, host-neutral *interface*: source recognition, stable language identity,
+function-boundary extraction and the approved probe ecosystem.  Consumers must
+use these profiles instead of keeping their own extension maps.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import ast
+import ctypes
+import importlib
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
+from typing import Iterable
+
+
+@dataclass(frozen=True)
+class DependencyHydration:
+    """A project-local ignored dependency tree safe to copy into a snapshot."""
+
+    directory_name: str
+    lockfile_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class LanguageProfile:
+    key: str
+    display_name: str
+    extensions: frozenset[str]
+    codegraph_languages: tuple[str, ...]
+    treesitter_languages: tuple[str, ...]
+    span_extractor: str
+    public_entry_strategy: str
+    probe_extension: str | None
+    build_detectors: tuple[str, ...]
+    requires_build_metadata: bool
+    build_adapter: str | None
+    dynamic_adapter: str | None
+    agent_execution_ecosystems: tuple[str, ...]
+    dependency_hydration: DependencyHydration | None
+    support_level: str
+
+
+def _profile(key, display_name, extensions, codegraph=(), treesitter=(), probe=None,
+             detectors=(), required_metadata=False, build_adapter=None, dynamic_adapter=None, level="static_only", extractor="codegraph-then-tree-sitter", agent_ecosystems=None, dependency_hydration=None) -> LanguageProfile:
+    # The main Skill follows FM-Agent's one generic Bug Validator path. A
+    # Worker selects the concrete project toolchain only after it has inspected
+    # the public entry point; fixed language adapters are reserved for the
+    # optional restricted execution mode.
+    agent_ecosystems = ("host-project-toolchain",) if agent_ecosystems is None else agent_ecosystems
+    return LanguageProfile(
+        key, display_name, frozenset(extensions), tuple(codegraph), tuple(treesitter),
+        extractor, "structured-public-entrypoint", probe,
+        tuple(detectors), required_metadata, build_adapter, dynamic_adapter, tuple(agent_ecosystems), dependency_hydration, level,
+    )
+
+
+PROFILES: tuple[LanguageProfile, ...] = (
+    _profile("python", "Python", {".py"}, ("python",), ("python",), ".py", ("pyproject.toml", "setup.py", "setup.cfg"), False, "python", "python-packaging", "full", "codegraph-then-tree-sitter-then-python-ast"),
+    _profile("javascript", "JavaScript", {".js", ".jsx", ".mjs", ".cjs"}, ("javascript", "jsx"), ("javascript",), ".js", ("package.json",), False, "javascript", "node", "full"),
+    _profile("typescript", "TypeScript", {".ts", ".tsx", ".mts", ".cts"}, ("typescript", "tsx"), ("typescript", "tsx"), ".ts", ("tsconfig.json",), True, "typescript", "node-typescript", "full"),
+    _profile("go", "Go", {".go"}, ("go",), ("go",), ".go", ("go.mod",), True, "go", "go-modules", "full"),
+    _profile("rust", "Rust", {".rs"}, ("rust",), ("rust",), ".rs", ("Cargo.toml", "Cargo.lock"), True, "cargo", "cargo", "full"),
+    _profile("java", "Java", {".java"}, ("java",), ("java",), ".java", ("pom.xml", "build.gradle", "build.gradle.kts"), False, "java", None, "full"),
+    _profile("c", "C", {".c"}, ("c",), ("c",), ".c", ("CMakeLists.txt",), True, "cmake", None, "full", "codegraph-then-tree-sitter-then-clang-ast"),
+    _profile("cpp", "C++", {".cc", ".cpp", ".cxx", ".h", ".hpp"}, ("cpp",), ("cpp",), ".cpp", ("CMakeLists.txt",), True, "cmake", None, "full", "codegraph-then-tree-sitter-then-clang-ast"),
+    _profile("cuda", "CUDA", {".cu", ".cuh"}, ("cpp",), ("cpp",), ".cu", ("CMakeLists.txt",), True, None, None, "capability_plugin"),
+    # CodeGraph does not index ArkTS. Keep the explicit compatibility parser
+    # used by FM-Agent instead of pretending an ETS export is authoritative.
+    _profile(
+        "arkts", "ArkTS", {".ets"}, (), (), ".ets",
+        ("hvigorfile.ts", "build-profile.json5"), True, None, None, "full",
+        "arkts-brace", dependency_hydration=DependencyHydration(
+            "oh_modules", ("oh-package-lock.json5", "oh-package-lock.json"),
+        ),
+    ),
+    _profile("erlang", "Erlang", {".erl"}, (), (), ".erl", ("rebar.config", "mix.exs"), True, None, None, "capability_plugin"),
+)
+
+_BY_KEY = {profile.key: profile for profile in PROFILES}
+_BY_EXTENSION = {extension: profile for profile in PROFILES for extension in profile.extensions}
+CORE_LEVELS = {"full", "static_only"}
+
+
+def profile_for_path(path: str | Path) -> LanguageProfile | None:
+    return _BY_EXTENSION.get(Path(path).suffix.lower())
+
+
+def profile_for_key(key: str) -> LanguageProfile | None:
+    return _BY_KEY.get(key)
+
+
+def source_extensions(include_external: bool = False) -> frozenset[str]:
+    return frozenset(
+        extension for profile in PROFILES
+        if include_external or profile.support_level in CORE_LEVELS
+        for extension in profile.extensions
+    )
+
+
+def language_name(path: str | Path) -> str:
+    profile = profile_for_path(path)
+    return profile.key if profile else "unknown"
+
+
+def capability_matrix() -> list[dict]:
+    return [{
+        "key": item.key, "extensions": sorted(item.extensions),
+        "codegraph_languages": list(item.codegraph_languages),
+        "treesitter_languages": list(item.treesitter_languages),
+        "span_extractor": item.span_extractor,
+        "public_entry_strategy": item.public_entry_strategy,
+        "build_detectors": list(item.build_detectors),
+        "requires_build_metadata": item.requires_build_metadata,
+        "build_adapter": item.build_adapter,
+        "dynamic_adapter": item.dynamic_adapter,
+        "agent_execution_ecosystems": list(item.agent_execution_ecosystems),
+        "dependency_hydration": (
+            None if item.dependency_hydration is None else {
+                "directory_name": item.dependency_hydration.directory_name,
+                "lockfile_names": list(item.dependency_hydration.lockfile_names),
+            }
+        ),
+        "support_level": item.support_level,
+    } for item in PROFILES]
+
+
+def execution_ecosystems(profile: LanguageProfile, execution_mode: str) -> tuple[str, ...]:
+    """Return contract ecosystems allowed by the selected execution mechanism."""
+    if execution_mode == "agent-executed":
+        return profile.agent_execution_ecosystems or ("unavailable",)
+    if execution_mode == "adapter":
+        return (profile.dynamic_adapter or "unavailable",)
+    raise ValueError(f"unsupported execution mode: {execution_mode}")
+
+
+def probe_adapter_choices() -> tuple[str, ...]:
+    """Return the only accepted build-adapter values from the registry."""
+    adapters = sorted({item.build_adapter for item in PROFILES if item.build_adapter})
+    return tuple(["auto", *adapters, "none"])
+
+
+def _python_spans(path: Path) -> list[tuple[str, int, int]]:
+    tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    return [(node.name, node.lineno, getattr(node, "end_lineno", node.lineno))
+            for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+
+def _tree_sitter_spans(path: Path, profile: LanguageProfile) -> list[tuple[str, int, int]] | None:
+    """Use Tree-sitter when installed; absence is an explicit portable fallback."""
+    try:
+        from tree_sitter_languages import get_parser  # type: ignore[import-not-found]
+    except ImportError:
+        get_parser = None
+    parser = None
+    for name in profile.treesitter_languages:
+        if get_parser is not None:
+            try:
+                parser = get_parser(name); break
+            except Exception:
+                pass
+        language = _tree_sitter_language(name)
+        if language is None:
+            continue
+        try:
+            import tree_sitter  # type: ignore[import-not-found]
+            parser = tree_sitter.Parser()
+            try:
+                parser.language = language
+            except (AttributeError, TypeError):
+                parser.set_language(language)
+            break
+        except Exception:
+            parser = None
+    if parser is None: return None
+    source = path.read_bytes(); tree = parser.parse(source); found = []
+    node_types = {"function_definition", "function_declaration", "function_item", "method_definition", "method_declaration", "generator_function_declaration"}
+
+    def declaration_span(node):
+        """Include `const`/`export` only when a declaration owns one function."""
+        span = node; parent = node.parent
+        while parent is not None and parent.type in {"variable_declaration", "lexical_declaration", "export_statement"}:
+            declarators = [child for child in parent.named_children if child.type == "variable_declarator"]
+            if parent.type != "export_statement" and len(declarators) != 1:
+                break
+            span, parent = parent, parent.parent
+        return span
+
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop(); stack.extend(reversed(node.children))
+        span = node
+        if node.type == "variable_declarator":
+            value = node.child_by_field_name("value")
+            name_node = node.child_by_field_name("name")
+            if value is None or value.type != "arrow_function":
+                continue
+            span = declaration_span(node)
+        elif node.type in node_types:
+            name_node = node.child_by_field_name("name")
+        else:
+            continue
+        if name_node is None: continue
+        name = source[name_node.start_byte:name_node.end_byte].decode("utf-8", "replace")
+        if re.fullmatch(r"[A-Za-z_$][\w$]*", name): found.append((name, span.start_point[0] + 1, span.end_point[0] + 1))
+    return sorted(set(found), key=lambda item: (item[1], item[2], item[0]))
+
+
+def _tree_sitter_language(name: str):
+    """Load a grammar across old and new Python Tree-sitter bindings.
+
+    ``tree_sitter_languages`` currently targets the pre-0.22 API, while the
+    standalone grammar wheels expose a PyCapsule consumed by newer bindings.
+    Convert that capsule explicitly instead of making extraction depend on one
+    exact package combination.
+    """
+    modules = {
+        "typescript": ("tree_sitter_typescript", "language_typescript"),
+        "tsx": ("tree_sitter_typescript", "language_tsx"),
+        "javascript": ("tree_sitter_javascript", "language"),
+        "python": ("tree_sitter_python", "language"),
+        "c": ("tree_sitter_c", "language"),
+        "cpp": ("tree_sitter_cpp", "language"),
+        "rust": ("tree_sitter_rust", "language"),
+        "go": ("tree_sitter_go", "language"),
+        "java": ("tree_sitter_java", "language"),
+    }
+    spec = modules.get(name)
+    if spec is None:
+        return None
+    try:
+        capsule = getattr(importlib.import_module(spec[0]), spec[1])()
+        if type(capsule).__name__ != "PyCapsule":
+            return capsule
+        api = ctypes.pythonapi
+        api.PyCapsule_GetPointer.restype = ctypes.c_void_p
+        api.PyCapsule_GetPointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+        pointer = api.PyCapsule_GetPointer(capsule, b"tree_sitter.Language")
+        if not pointer:
+            return None
+        import tree_sitter  # type: ignore[import-not-found]
+        return tree_sitter.Language(pointer)
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        return None
+
+
+_ARKTS_SKIP = frozenset({
+    "if", "else", "while", "for", "do", "switch", "case", "return", "throw",
+    "new", "delete", "typeof", "instanceof", "void", "const", "let", "var",
+    "class", "import", "export", "async", "await", "struct",
+})
+
+
+def _arkts_brace_end(lines: list[str], start: int) -> int | None:
+    """Match one ArkTS body while ignoring comments and string literals.
+
+    FM-Agent uses a language-specific brace extractor for ArkTS because its
+    CodeGraph integration has no ArkTS parser. This is not a generic fallback.
+    """
+    depth, opened, block_comment = 0, False, False
+    for line_number in range(start, len(lines)):
+        line, column = lines[line_number], 0
+        while column < len(line):
+            char = line[column]
+            following = line[column + 1] if column + 1 < len(line) else ""
+            if block_comment:
+                if char == "*" and following == "/":
+                    block_comment, column = False, column + 2
+                else:
+                    column += 1
+                continue
+            if char == "/" and following == "/":
+                break
+            if char == "/" and following == "*":
+                block_comment, column = True, column + 2
+                continue
+            if char in {"'", '"', "`"}:
+                quote, column = char, column + 1
+                while column < len(line):
+                    if line[column] == "\\":
+                        column += 2
+                    elif line[column] == quote:
+                        column += 1
+                        break
+                    else:
+                        column += 1
+                continue
+            if char == "{":
+                depth, opened = depth + 1, True
+            elif char == "}" and opened:
+                depth -= 1
+                if depth == 0:
+                    return line_number
+            column += 1
+    return None
+
+
+def _arkts_brace_spans(path: Path) -> list[tuple[str, int, int]]:
+    """Port FM-Agent's ArkTS brace-boundary extraction for `.ets` sources."""
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    found: list[tuple[str, int, int]] = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if not stripped or stripped.startswith(("//", "import ", "export type ", "export interface ")):
+            index += 1
+            continue
+        if re.match(r"^(?:export\s+(?:default\s+)?)?(?:class|interface|enum|type|struct)\b", stripped):
+            index += 1
+            continue
+        if "(" not in stripped or stripped.rstrip().endswith(";") or re.match(r"^(if|for|while|switch|catch)\b", stripped):
+            index += 1
+            continue
+        signature_end, signature = index, stripped
+        for candidate in range(index, min(index + 6, len(lines))):
+            if "{" in lines[candidate]:
+                signature_end = candidate
+                signature = " ".join(line.strip() for line in lines[index:candidate + 1])
+                break
+        if "{" not in lines[signature_end]:
+            index += 1
+            continue
+        declared = re.search(r"\bfunction\s+([A-Za-z_$][\w$]*)", signature)
+        name = declared.group(1) if declared else None
+        if name is None:
+            arrow = re.search(
+                r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(",
+                signature,
+            )
+            name = arrow.group(1) if arrow else None
+        if name is None:
+            for match in re.finditer(r"\b([A-Za-z_$][\w$]*)\s*(?:<[^>]*>\s*)?\(", signature):
+                candidate = match.group(1)
+                if candidate not in _ARKTS_SKIP:
+                    name = candidate
+                    break
+        end = _arkts_brace_end(lines, signature_end)
+        if name is None or end is None:
+            index += 1
+            continue
+        found.append((name, index + 1, end + 1))
+        index = end + 1
+    return found
+
+
+def _clang_ast_spans(path: Path, profile: LanguageProfile) -> list[tuple[str, int, int]] | None:
+    """Use Clang's JSON AST only for C-family profiles when Tree-sitter lacks a grammar."""
+    if profile.key not in {"c", "cpp"}:
+        return None
+    compiler = shutil.which("clang" if profile.key == "c" else "clang++")
+    if compiler is None:
+        return None
+    language = "c" if profile.key == "c" else "c++"
+    include_dirs = [path.parent]
+    include_dirs.extend(parent / "include" for parent in path.parents if (parent / "include").is_dir())
+    include_args = [argument for directory in dict.fromkeys(item.resolve() for item in include_dirs) for argument in ("-I", str(directory))]
+    try:
+        completed = subprocess.run(
+            [compiler, "-Xclang", "-ast-dump=json", "-fsyntax-only", "-x", language, *include_args, str(path)],
+            text=True, capture_output=True, check=False, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode:
+        return None
+    try:
+        tree = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return None
+    source = path.resolve(); source_bytes = path.read_bytes(); spans: list[tuple[str, int, int]] = []
+    declaration_kinds = {"FunctionDecl", "CXXMethodDecl", "CXXConstructorDecl", "CXXDestructorDecl", "CXXConversionDecl"}
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        children = node.get("inner", []) if isinstance(node, dict) else []
+        if isinstance(children, list):
+            stack.extend(reversed(children))
+        if not isinstance(node, dict) or node.get("kind") not in declaration_kinds:
+            continue
+        if not any(isinstance(child, dict) and child.get("kind") == "CompoundStmt" for child in children):
+            continue
+        location = node.get("loc", {}); source_range = node.get("range", {})
+        begin, end = source_range.get("begin", {}), source_range.get("end", {})
+        if not isinstance(location, dict) or not isinstance(begin, dict) or not isinstance(end, dict):
+            continue
+        if "includedFrom" in location or "includedFrom" in begin:
+            continue
+        file_name = location.get("file") or begin.get("file")
+        if isinstance(file_name, str):
+            try:
+                if Path(file_name).resolve() != source:
+                    continue
+            except OSError:
+                continue
+        def line_for(location: dict, fallback: int | None = None) -> int | None:
+            line, offset = location.get("line"), location.get("offset")
+            if isinstance(line, int):
+                return line
+            if isinstance(offset, int) and offset >= 0:
+                return source_bytes.count(b"\n", 0, offset) + 1
+            return fallback
+
+        name = node.get("name")
+        start = line_for(begin, line_for(location))
+        finish = line_for(end, start)
+        if isinstance(name, str) and isinstance(start, int) and isinstance(finish, int) and start >= 1 and finish >= start:
+            spans.append((name, start, finish))
+    return sorted(set(spans), key=lambda item: (item[1], item[2], item[0]))
+
+
+def function_spans(path: Path, codegraph_spans: Iterable[tuple[str, int, int]] | None = None) -> tuple[list[tuple[str, int, int]], str]:
+    """Return spans from CodeGraph first, then a real syntax tree.
+
+    There is deliberately no generic text/regular-expression fallback: a
+    guessed boundary would corrupt specification and call-graph artifacts.
+    ArkTS uses its profile-declared compatibility brace parser, mirroring
+    FM-Agent. Python can
+    use its standard-library AST when Tree-sitter is unavailable; all other
+    profiles fail closed until their declared grammar is installed. C and C++
+    additionally use their profile-declared Clang AST adapter, never text.
+    """
+    profile = profile_for_path(path)
+    if profile is None: return [], "unsupported"
+    if codegraph_spans is not None:
+        spans = [(str(name), int(start), int(end)) for name, start, end in codegraph_spans if int(start) >= 1 and int(end) >= int(start)]
+        if spans: return spans, "codegraph"
+    if profile.span_extractor == "arkts-brace":
+        return _arkts_brace_spans(path), "arkts-brace"
+    parsed = _tree_sitter_spans(path, profile)
+    if parsed is not None: return parsed, "tree-sitter"
+    parsed = _clang_ast_spans(path, profile)
+    if parsed is not None: return parsed, "clang-ast"
+    if profile.key == "python":
+        try: return _python_spans(path), "python-ast"
+        except (SyntaxError, OSError): return [], "parse-error"
+    return [], "tree-sitter-unavailable"
