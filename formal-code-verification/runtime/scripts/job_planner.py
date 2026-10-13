@@ -10,9 +10,11 @@ from pathlib import Path
 from _common import project, state
 import complexity
 import scheduler
+import incremental
+import executor
 
 
-SUPPORTED_PHASES = {"specification", "verification", "verify_affected", "bug_validation"}
+SUPPORTED_PHASES = {"specification", "verification", "verify_affected", "bug_validation", "select_scope", "update_specs"}
 
 
 def _active(target: Path, phase: str) -> dict:
@@ -65,6 +67,7 @@ def _ensure_job(target: Path, payload: dict) -> tuple[str, bool]:
         "depends_on": payload.get("depends_on", []),
         "required_outputs": payload.get("required_outputs", []),
         "artifacts": payload.get("artifacts", []),
+        "input": payload.get("input", {}),
     }
     if any(existing.get(key) != value for key, value in expected.items()):
         raise ValueError(f"existing job conflicts with deterministic plan: {payload['id']}")
@@ -75,8 +78,8 @@ def _existing_job(target: Path, phase: str, kind: str, artifacts: list[str] | No
     matches = []
     connection = scheduler._connect(target)
     rows = connection.execute(
-        "SELECT payload_json FROM jobs WHERE phase=? AND type=? ORDER BY job_id",
-        (phase, kind),
+        "SELECT payload_json FROM jobs WHERE run_id=? AND phase=? AND type=? ORDER BY job_id",
+        (scheduler._run_id(target)[0], phase, kind),
     ).fetchall()
     connection.close()
     for row in rows:
@@ -188,16 +191,127 @@ def _specification(target: Path, record: dict, phase: str) -> dict:
         missing = sorted(expected - seen)
         raise ValueError("phase layers do not cover selected functions: " + ", ".join(missing[:3]))
     result = _write_plan(target, record, phase, entries, created)
-    # Build downstream jobs now. Their per-function dependencies keep them
-    # blocked until the corresponding spec batch succeeds, enabling streaming
-    # without weakening caller-first specification ordering.
-    if config.get("spec_batch_size") is None:
-        downstream = "verify_affected" if record.get("mode") == "incremental" else "verification"
-        result["streaming_verification_plan"] = _verification(target, record, downstream)["plan_path"]
     return result
 
 
+def _qualified_id(target: Path, stem: str) -> str:
+    return f"{stem}-{scheduler._run_id(target)[0]}"
+
+
+def _modules(target: Path) -> list[dict]:
+    result = []
+    for number, phase in enumerate(state.read_json(state.fm_dir(target) / "phases.json", {}).get("phases", []), 1):
+        for index, module in enumerate(phase.get("modules", []), 1):
+            result.append({"id": f"phase-{phase.get('phase', number)}-module-{index}",
+                           "name": module.get("name", str(index)), "source_files": module.get("source_files", [])})
+    return result
+
+
+def validate_modules(target: Path, payload: dict) -> list[str]:
+    selected, excluded = payload.get("selected_modules"), payload.get("excluded_modules")
+    known = {item["id"] for item in _modules(target)}
+    if not isinstance(selected, list) or not isinstance(excluded, list) or not all(isinstance(item, str) for item in selected + excluded):
+        raise ValueError("module selection requires selected_modules and excluded_modules string arrays")
+    if len(selected + excluded) != len(set(selected + excluded)) or set(selected + excluded) != known:
+        raise ValueError("module selection must account for every assigned module exactly once")
+    return sorted({path for item in _modules(target) if item["id"] in selected for path in item["source_files"]})
+
+
+def _select_scope(target: Path, record: dict, phase: str) -> dict:
+    data = incremental.decision(target)
+    jobs = scheduler.current_jobs_for_phase(target, phase)
+    module_job = next((job for job in jobs if job["type"] == "select_relevant_modules"), None)
+    created = 0
+    if module_job is None:
+        job_id = _qualified_id(target, "select-modules")
+        _, made = _ensure_job(target, {"id": job_id, "phase": phase, "type": "select_relevant_modules",
+            "depends_on": [], "required_outputs": [f"fm_agent/relevant_modules-{scheduler._run_id(target)[0]}.json"],
+            "artifacts": [], "input": {"modules": _modules(target)}})
+        created += int(made)
+    elif module_job["status"] == "succeeded":
+        sources = validate_modules(target, state.read_json(target / module_job["required_outputs"][0], {}))
+        file_job = next((job for job in jobs if job["type"] == "select_relevant_files"), None)
+        if file_job is None:
+            job_id = _qualified_id(target, "select-files")
+            _, made = _ensure_job(target, {"id": job_id, "phase": phase, "type": "select_relevant_files",
+                "depends_on": [module_job["id"]], "required_outputs": [f"fm_agent/relevant_files-{scheduler._run_id(target)[0]}.json"],
+                "artifacts": [], "input": {"module_record": module_job["required_outputs"][0], "source_paths": sources,
+                    "eligible_function_ids": [key for key, item in incremental.functions(target).items() if item["path"] in sources]}})
+            created += int(made)
+        elif file_job["status"] == "succeeded" and not data["selection_complete"]:
+            incremental.merge_selection(target, target / file_job["required_outputs"][0], "intent")
+    return _write_plan(target, record, phase, [], created)
+
+
+def _update_specs(target: Path, record: dict, phase: str) -> dict:
+    data = incremental.decision(target)
+    if not data.get("sidecars_restored"):
+        executor.restore_specs(target)
+        data["sidecars_restored"] = True
+        incremental.save(target, data)
+    jobs = scheduler.current_jobs_for_phase(target, phase)
+    created = 0
+    context_job = next((job for job in jobs if job["type"] == "domain_context"), None)
+    if context_job is None:
+        _, made = _ensure_job(target, {"id": _qualified_id(target, "update-domain-context"), "phase": phase,
+            "type": "domain_context", "depends_on": [], "required_outputs": _context_outputs(target), "artifacts": []})
+        return _write_plan(target, record, phase, [], int(made))
+    if context_job["status"] != "succeeded":
+        return _write_plan(target, record, phase, [], 0)
+    for job in jobs:
+        if job["status"] != "succeeded" or job["id"] in data["processed_jobs"]:
+            continue
+        if job["type"] == "incremental_spec_plan":
+            incremental.apply_plan(target, target / job["required_outputs"][0], job["artifacts"], job["id"])
+        elif job["type"] == "reconcile_caller_info":
+            ticket = state.read_json(state.control_dir(target) / "dispatches" / f"{job['id']}.json", {})
+            incremental.reconcile(target, job, ticket["before_sidecars"])
+        data = incremental.decision(target)
+    pending_jobs = [job for job in jobs if job["status"] != "succeeded"]
+    if not pending_jobs:
+        by_id = incremental.functions(target)
+        reconcile_ids = set(data["pending_reconcile"]) - set(data["pending_review"])
+        ordinal = len(jobs)
+        if reconcile_ids:
+            for function_id in sorted(reconcile_ids):
+                ordinal += 1
+                artifact = by_id[function_id]["artifact"]
+                _, made = _ensure_job(target, {"id": _qualified_id(target, f"reconcile-caller-{ordinal:05d}"),
+                    "phase": phase, "type": "reconcile_caller_info", "depends_on": [],
+                    "required_outputs": [f"fm_agent/extracted_functions/{artifact}.info.json"], "artifacts": [artifact],
+                    "input": {"function_id": function_id, "before_sidecars": {
+                        "spec": state.read_json(Path(f"{state.fm_dir(target) / 'extracted_functions' / artifact}.spec.json"), None),
+                        "info": state.read_json(Path(f"{state.fm_dir(target) / 'extracted_functions' / artifact}.info.json"), None),
+                    }}})
+                created += int(made)
+        elif data["pending_review"]:
+            selected = {by_id[key]["artifact"] for key in data["pending_review"]}
+            frontier = []
+            for layer_file in _layer_files(target):
+                for layer in state.read_json(layer_file, {}).get("layers", []):
+                    frontier = [item["artifact"] for item in layer.get("functions", []) if item["artifact"] in selected]
+                    if frontier:
+                        break
+                if frontier:
+                    break
+            if not frontier:
+                raise ValueError("incremental review frontier is absent from current top-down layers")
+            for batch in complexity.partition(target, frontier, _config(target, record), "spec_batch"):
+                ordinal += 1
+                job_id = _qualified_id(target, f"incremental-spec-{ordinal:05d}")
+                _, made = _ensure_job(target, {"id": job_id, "phase": phase, "type": "incremental_spec_plan",
+                    "depends_on": [], "required_outputs": [f"fm_agent_skill/worker_reports/{job_id}.json"],
+                    "artifacts": batch["artifacts"], "input": {"complexity": batch}})
+                created += int(made)
+        else:
+            incremental.finish_updates(target)
+    entries = [{"artifact": item["artifact"], "job_id": None} for item in incremental.functions(target).values()]
+    return _write_plan(target, record, phase, entries, created)
+
+
 def _verification(target: Path, record: dict, phase: str) -> dict:
+    if record.get("mode") == "incremental" and incremental.decision(target).get("update_complete") is not True:
+        raise ValueError("affected verification cannot start before incremental contract updates converge")
     functions = _selected(target, record, phase)
     entries, created = [], 0
     pending = []
@@ -230,7 +344,7 @@ def _verification(target: Path, record: dict, phase: str) -> dict:
         outputs = [f"fm_agent/logic_verification_results/{Path(item).with_suffix('.json').as_posix()}" for item in artifacts]
         dependencies = list(dict.fromkeys(spec_jobs.get(item) for item in artifacts if spec_jobs.get(item)))
         kind = "verify_function" if len(artifacts) == 1 else "verify_batch"
-        job_id = f"{phase}-verify-{ordinal:05d}"
+        job_id = _qualified_id(target, f"{phase}-verify-{ordinal:05d}")
         existing_job = _existing_job(target, phase, kind, artifacts=artifacts)
         if existing_job:
             job_id, made = existing_job["id"], False
@@ -251,22 +365,27 @@ def _verification(target: Path, record: dict, phase: str) -> dict:
 def _bug_validation(target: Path, record: dict, phase: str) -> dict:
     functions = _selected(target, record, phase)
     selected_ids = {item["id"] for item in functions}
-    candidates = state.direct_mismatch_ids(target, selected_ids if record.get("mode") == "incremental" else None)
+    candidates = state.direct_candidates(target, selected_ids if record.get("mode") == "incremental" else None)
+    if isinstance(record.get("validation_scope"), list):
+        candidates = {key: item for key, item in candidates.items() if key in record["validation_scope"]}
     entries, created = [], 0
-    for function_id in sorted(candidates):
-        digest = hashlib.sha256(function_id.encode("utf-8")).hexdigest()[:16]
+    for candidate_id, candidate in sorted(candidates.items()):
+        function_id = candidate["function_id"]
+        digest = hashlib.sha256(candidate_id.encode("utf-8")).hexdigest()[:16] + "-" + scheduler._run_id(target)[0]
         job_id = f"bug-validation-{digest}"
         output = f"fm_agent/bug_validation/{digest}.result.json"
-        existing_job = _existing_job(target, phase, "bug_validate", function_id=function_id)
+        existing_job = next((job for job in scheduler.current_jobs_for_phase(target, phase)
+                             if job.get("type") == "bug_validate" and job.get("input", {}).get("candidate_id") == candidate_id
+                             and (not record.get("validation_job_id") or job["id"] == record["validation_job_id"])), None)
         if existing_job:
             job_id, made = existing_job["id"], False
         else:
             _, made = _ensure_job(target, {
                 "id": job_id, "phase": phase, "type": "bug_validate", "depends_on": [],
                 "required_outputs": [output], "artifacts": [],
-                "input": {"bug_id": digest, "function_id": function_id, "mode": record["mode"]},
+                "input": {"bug_id": digest, "candidate_id": candidate_id, "function_id": function_id, "mode": record["mode"]},
             })
-        created += int(made); entries.append({"function_id": function_id, "job_id": job_id})
+        created += int(made); entries.append({"candidate_id": candidate_id, "function_id": function_id, "job_id": job_id})
     return _write_plan(target, record, phase, entries, created)
 
 
@@ -287,7 +406,11 @@ def main() -> None:
     args = parser.parse_args(); target = project(args)
     try:
         record = _active(target, args.phase)
-        if args.phase == "specification":
+        if args.phase == "select_scope":
+            result = _select_scope(target, record, args.phase)
+        elif args.phase == "update_specs":
+            result = _update_specs(target, record, args.phase)
+        elif args.phase == "specification":
             result = _specification(target, record, args.phase)
         elif args.phase in {"verification", "verify_affected"}:
             result = _verification(target, record, args.phase)

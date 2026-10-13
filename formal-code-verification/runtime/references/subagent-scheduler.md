@@ -9,22 +9,23 @@ control state, phase transitions, lock heartbeats, and user-visible status.
 ## Job lifecycle
 
 At the start of specification, verification, or Bug Validation, the
-Coordinator calls `job_planner.py` once for the current pipeline phase. It
-creates every job in the current scope before execution; the Coordinator does
-not hand-author semantic manifests or postpone later specification layers.
+phase driver calls `job_planner.py` for the current phase. Full semantic phases
+plan their complete scope; incremental selection and updates plan the next
+selector or caller-first review/reconciliation frontier after accepted changes. The Coordinator does not hand-author semantic manifests or bypass the deterministic frontier.
 The planner rejects any phase other than the active earliest incomplete phase;
 Verification and Bug Validation cannot be seeded from partial downstream
 artifacts.
-Then obtain `scheduler.py admissible`. For each returned
-job, call `scheduler.py start` **before** invoking the host subagent. `start`
-is the admission point: it atomically rejects a job when its global or
-type-specific capacity is full. Never launch a worker merely because it was
-previously listed as ready.
+Then obtain `durable_executor.py next`. Claim one returned descriptor through
+`durable_executor.py claim` immediately before launching its native Worker.
+The claim atomically calls the scheduler admission point and creates the exact
+dispatch ticket. Never launch a Worker merely because it was listed as ready.
+After each receipt, call the phase driver again so accepted incremental plans
+are applied and new frontiers are queued before a phase can finish.
 
-For `specification`, `verification`, and `verify_affected`, the Coordinator
+For `specification`, `verification`, `verify_affected`, `select_scope`, and `update_specs`, the Coordinator
 must use `semantic_executor.py prepare/dispatch/submit` instead of calling those
-scheduler transitions directly. The executor removes unassigned result files,
-then issues an exact dispatch ticket before acquiring each lease. It never
+scheduler transitions directly. The executor removes only unassigned, unqualified result files and issues an
+exact dispatch ticket after the atomic lease claim. It never
 derives a semantic verdict or skips an `unavailable` contract; every pending
 verification job reaches the original FM-Agent-style reasoner. Never use a
 generated JavaScript/Dynamic Workflow for these jobs, ask an Agent to parse the
@@ -39,7 +40,7 @@ Coordinator passes planned-phase receipts to `semantic_executor.py submit` and
 other receipts to `scheduler.py complete`; it does not paste
 worker reasoning or source excerpts into its own context. Every new
 `verify_function` job owns exactly one extracted artifact and its matching
-result path. `complete` validates the schema-v2 A→B result immediately; a bare
+result path. `complete` validates the schema-v3 A→B result immediately; a bare
 or weakly evidenced `MISMATCH` becomes an output retry and cannot enter Bug
 Validator. Workers never write
 job manifests, phase receipts, locks, or other control state.
@@ -87,7 +88,7 @@ failure) before its normal gate.
 | static edge resolution without CodeGraph | `fm-agent-skill:fm-agent-static-edge-worker` | one bounded candidate, then deterministic validation |
 | specification batch generation | `fm-agent-skill:fm-spec-batch-worker` | same layer batches in parallel |
 | function Hoare reasoner | `fm-agent-skill:fm-verify-function-worker` | one compatibility function or adaptive batch; each function writes independent A→B output |
-| Bug Validator | `fm-agent-skill:fm-bug-validate-worker` | one direct `MISMATCH` per job |
+| Bug Validator | `fm-agent-skill:fm-bug-validate-worker` | one direct candidate ID per run-qualified job/probe directory |
 | incremental module selection | `fm-agent-skill:fm-select-relevant-modules-worker` | one job |
 | incremental file selection | `fm-agent-skill:fm-select-relevant-files-worker` | after module selection |
 | incremental spec update planning | `fm-agent-skill:fm-incremental-spec-plan-worker` | parallel read-only plans |
@@ -101,7 +102,7 @@ Coordinator:
 | Work type | Maximum active jobs |
 | --- | ---: |
 | all host subagents | 16 |
-| `spec_batch` | 6 |
+| `spec_batch` | 8 |
 | `verify_function` | 12 |
 | `bug_validate` | 4 |
 | `incremental_spec_plan` | 4 |
@@ -114,9 +115,12 @@ changing them does not invalidate an otherwise valid Git baseline. Parallel Bug
 Validator Workers may read the same snapshot but must use only their own
 attempt-local workspace and caches; they cannot share project-root build
 outputs. Use `scheduler.py capacity` to inspect leases. Phases are aggregate
-gates, not dispatch barriers: spec completion unlocks its verify work and a
-schema-valid direct `MISMATCH` unlocks its Bug Validator. Finalization waits
-for DAG convergence. Within a capacity window, admission is deterministic and
+gates and ordering boundaries: complete specification unlocks verification;
+complete verification unlocks candidate validation. Incremental verification
+additionally requires `update_complete` after every actual sidecar difference
+and caller reconciliation has settled. Stable reviewed pairs retain original
+proof origins, and changed caller expectations enqueue only relevant direct
+callees. Finalization waits for DAG convergence. Within a capacity window, admission is deterministic and
 fair: ready jobs are selected in ascending job-id order, and later jobs are
 admitted on the next call after earlier jobs finish or release capacity. The
 host supplies subagent calls; the Skill enforces artifact contracts on Claude

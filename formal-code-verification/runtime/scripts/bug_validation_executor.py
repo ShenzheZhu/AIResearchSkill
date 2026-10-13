@@ -61,6 +61,10 @@ def worker_request(target: Path, job: dict, pass_name: str, host: str = "auto") 
     function_id = job.get("input", {}).get("function_id")
     if not isinstance(function_id, str) or not function_id:
         raise ValueError("Bug Validator ticket requires its assigned function identity")
+    candidate_id = job.get("input", {}).get("candidate_id")
+    candidate = state.direct_candidates(target).get(candidate_id)
+    if not isinstance(candidate_id, str) or not candidate_id:
+        raise ValueError("Bug Validator ticket requires its assigned current direct candidate")
     root = attempt_dir(target, bug_id, attempt).relative_to(target).as_posix()
     manifest = f"fm_agent_skill/jobs/{job['id']}.json"
     reads = {manifest}
@@ -81,6 +85,8 @@ def worker_request(target: Path, job: dict, pass_name: str, host: str = "auto") 
         reads.update({verification, "fm_agent_skill/control/analysis_index.json", "fm_agent_skill/control/graph_edges.json"})
         if not all((target / path).is_file() for path in (item["path"], f"fm_agent/extracted_functions/{item['artifact']}", verification)):
             raise ValueError("Bug Validator preparation is missing assigned source or verification evidence")
+        if candidate is None or candidate["function_id"] != function_id:
+            raise ValueError("Bug Validator preparation requires its assigned validated direct candidate")
         language = item["language"]
         public_entrypoint = None
     else:
@@ -138,6 +144,8 @@ def worker_request(target: Path, job: dict, pass_name: str, host: str = "auto") 
         "validation_message": job.get("message"),
         "phase": job["phase"],
         "function_id": function_id,
+        "candidate_id": candidate_id,
+        "candidate_reasoning": candidate["reasoning"] if candidate is not None else None,
         "snapshot_commit": state.current_snapshot_commit(target),
         "language": language,
         "execution_mode": execution,
@@ -168,11 +176,14 @@ def agent_execution_result_valid(target: Path, job: dict, *, snapshot_commit: st
     bug_id, _ = context(job); attempt = int(job["attempts"])
     snapshot_commit = snapshot_commit or state.current_snapshot_commit(target)
     _, contract = read_contract(target, bug_id, attempt, "agent-executed", snapshot_commit=snapshot_commit)
+    if any(contract.get(key) != job["input"].get(key) for key in ("candidate_id", "function_id")):
+        return False
     result = state.read_json(attempt_dir(target, bug_id, attempt) / "reproduction_result.json", None)
     if not isinstance(result, dict):
         return False
     if any(result.get(key) != value for key, value in {
-        "schema_version": 1, "execution_mode": "agent-executed", "bug_id": bug_id,
+        "schema_version": 2, "execution_mode": "agent-executed", "bug_id": bug_id,
+        "candidate_id": job["input"]["candidate_id"], "function_id": job["input"]["function_id"],
         "attempt": attempt, "snapshot_commit": snapshot_commit,
         "language": contract["language"], "public_entrypoint": contract["public_entrypoint"],
     }.items()):
@@ -214,8 +225,11 @@ def execution_result_valid(target: Path, job: dict, *, snapshot_commit: str | No
         return agent_execution_result_valid(target, job, snapshot_commit=snapshot_commit)
     snapshot_commit = snapshot_commit or state.current_snapshot_commit(target)
     _, contract = read_contract(target, bug_id, attempt, "adapter", snapshot_commit=snapshot_commit)
+    if any(contract.get(key) != job["input"].get(key) for key in ("candidate_id", "function_id")):
+        return False
     if any(result.get(key) != value for key, value in {
-        "schema_version": 1, "bug_id": bug_id, "attempt": attempt,
+        "schema_version": 2, "bug_id": bug_id, "attempt": attempt,
+        "candidate_id": job["input"]["candidate_id"], "function_id": job["input"]["function_id"],
         "snapshot_commit": snapshot_commit, "language": contract["language"],
         "public_entrypoint": contract["public_entrypoint"],
     }.items()) or not isinstance(result.get("reason"), str):

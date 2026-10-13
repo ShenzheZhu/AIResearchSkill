@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import bug_validation_executor  # noqa: E402
+from fm_agent_core import state
 
 
 class BugValidationReceiptTest(unittest.TestCase):
@@ -37,7 +38,7 @@ class BugValidationReceiptTest(unittest.TestCase):
                 "attempts": 1,
                 "required_outputs": [output],
                 "bug_result_path": output,
-                "input": {"bug_id": "candidate", "mode": "full"},
+                "input": {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"), "bug_id": "candidate", "mode": "full"},
             }
             captured: dict[str, object] = {}
 

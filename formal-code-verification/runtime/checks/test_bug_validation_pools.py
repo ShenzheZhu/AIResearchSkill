@@ -34,7 +34,7 @@ class BugValidationPoolsTest(unittest.TestCase):
             scheduler.create(target, {
                 "id": f"bug-{index}", "phase": "bug_validation", "type": "bug_validate",
                 "depends_on": [], "required_outputs": [f"fm_agent/bug_validation/{index}.result.json"],
-                "artifacts": [], "input": {"bug_id": f"bug-{index}", "function_id": f"f-{index}", "mode": "full"},
+                "artifacts": [], "input": {"candidate_id": state.candidate_id(f"f-{index}"), "bug_id": f"bug-{index}", "function_id": f"f-{index}", "mode": "full"},
             })
         return target
 
@@ -65,14 +65,14 @@ class BugValidationPoolsTest(unittest.TestCase):
             root = target / "fm_agent_skill/probes/bug-0/attempt_001"
             entry = {"ecosystem": "host-project-toolchain", "kind": "module", "target": "calc.py", "symbol": "value"}
             (target / "calc.py").write_text("def value(): return 1\n", encoding="utf-8")
-            state.atomic_json(root / "reproduction.json", {
-                "schema_version": 2, "bug_id": "bug-0", "attempt": 1, "snapshot_commit": "unversioned",
+            state.atomic_json(root / "reproduction.json", {"function_id": "f-0", "candidate_id": state.candidate_id("f-0"),
+                "schema_version": 3, "bug_id": "bug-0", "attempt": 1, "snapshot_commit": "unversioned",
                 "language": "python", "public_entrypoint": entry, "probe_file": "probe.py", "timeout_seconds": 30,
                 "expected_marker": "CONFIRMED", "not_confirmed_marker": "NOT CONFIRMED",
             })
             (root / "probe.py").write_text('print("CONFIRMED")\n', encoding="utf-8")
-            state.atomic_json(root / "reproduction_result.json", {
-                "schema_version": 1, "execution_mode": "agent-executed", "bug_id": "bug-0", "attempt": 1,
+            state.atomic_json(root / "reproduction_result.json", {"function_id": "f-0", "candidate_id": state.candidate_id("f-0"),
+                "schema_version": 2, "execution_mode": "agent-executed", "bug_id": "bug-0", "attempt": 1,
                 "snapshot_commit": "unversioned", "language": "python", "public_entrypoint": entry,
                 "state": "completed", "classification": "confirmed", "reason": "Recorded probe reproduced the mismatch",
                 "commands": [{"command": "python3 probe.py", "cwd": root.relative_to(target).as_posix(), "returncode": 0,

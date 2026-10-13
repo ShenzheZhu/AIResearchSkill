@@ -63,7 +63,8 @@ it may pass the following arguments to the same workflow:
 [natural-language change note]
   [--submodule path ...] [--one-phase]
   [--extra-edge file-or-dir] [--knowledge file ...] [--resume]
-  [--validate function-id]
+  [--incremental intent.md] [--all-bugs | --no-all-bugs]
+  [--validate function-or-candidate-id]
 ```
 
 Treat all text not matching an option as the change note. Resolve paths relative
@@ -82,19 +83,32 @@ natural-language change note:
 - `--extra-edge FILE_OR_DIR`
 - `--one-phase`
 - `--resume`
-- `--validate FUNCTION_ID`
+- `--incremental INTENT.md`
+- `--all-bugs` or `--no-all-bugs` (omit to inherit saved defaults/mode)
+- `--validate FUNCTION_OR_CANDIDATE_ID`
 
 `--validate` requires a completed baseline with existing verification results.
-It runs only Bug Validation for the named function's MISMATCH candidate without
-repeating earlier stages. Its report and private probe evidence are merged into
+It runs only Bug Validation for one existing candidate without repeating earlier
+stages. A function ID resolves only when it has exactly one candidate; with
+multiple candidates, supply the explicit `<function-id>::bug-001` identity.
+Its report and private probe evidence are merged into
 the current baseline's Bug Validation result set; validating another candidate
 does not discard an earlier candidate's accepted result. It is incompatible with a new change note,
-`--submodule`, `--knowledge`, `--extra-edge`, and `--one-phase`.
+`--submodule`, `--knowledge`, `--extra-edge`, `--incremental`, and `--one-phase`.
 
 The baseline is content-addressed: a run begun with uncommitted source changes
 remains eligible for `--validate` if the current production-source manifest is
 identical to its private snapshot. If source files changed afterwards, run an
 incremental analysis first; Git `HEAD` equality alone is not sufficient.
+
+`--incremental INTENT.md` requires a compatible completed baseline and accepts
+a non-empty Markdown developer goal. `--note` adds captured text. New intent
+can select incremental mode without a source diff and overrides older knowledge
+only on the clauses it changes. Unchanged source plus no new intent is a no-op;
+a completed identical captured intent is not new. `--all-bugs` continues complete
+reasoning after each independent mismatch and records separate candidates;
+`--no-all-bugs` uses the default single-candidate mode. These modes do not mix on
+resume.
 
 All remaining text is the change note. Preserve every option value and pass
 each option separately. First perform this read-only inspection. It never
@@ -104,7 +118,8 @@ acquires a lock, writes state, or rebuilds CodeGraph:
 <python3> "$FM_AGENT_SKILL_ROOT/scripts/orchestrate.py" inspect \
   --project "$PROJECT" \
   [--submodule "$PATH"]... [--knowledge "$FILE"]... \
-  [--extra-edge "$FILE_OR_DIR"] [--one-phase]
+  [--extra-edge "$FILE_OR_DIR"] [--one-phase] [--note "$CHANGE_NOTE"] \
+  [--incremental "$INTENT_FILE"] [--all-bugs | --no-all-bugs]
 ```
 
 ### Explicit resume
@@ -112,13 +127,15 @@ acquires a lock, writes state, or rebuilds CodeGraph:
 `--resume` means continue the interrupted `full` or `incremental` analysis;
 it never changes its saved scope or
 configuration. It is mutually exclusive with `--submodule`, `--knowledge`,
-`--extra-edge`, `--one-phase`, and a new change note. Read
+`--extra-edge`, `--one-phase`, `--incremental`, and a new change note. Omitted
+`--all-bugs` inherits the saved reasoning mode; an explicit contrary value is
+rejected. Read
 [resume-contract.md](../../references/resume-contract.md), then inspect it
 before any ordinary mode selection or CodeGraph action:
 
 ```bash
 <python3> "$FM_AGENT_SKILL_ROOT/scripts/orchestrate.py" resume-inspect \
-  --project "$PROJECT"
+  --project "$PROJECT" [--all-bugs | --no-all-bugs]
 ```
 
 If this returns an error, report its reason and do not start a fresh analysis.
@@ -131,11 +148,14 @@ reply may the agent append `--take-over` below.
 
 ```bash
 <python3> "$FM_AGENT_SKILL_ROOT/scripts/orchestrate.py" resume \
-  --project "$PROJECT" [--take-over]
+  --project "$PROJECT" [--take-over] [--all-bugs | --no-all-bugs]
 ```
 
 Retain the returned `config` and `resume_from_phase`. Execute only the current
-analysis's first incomplete phase and later phases. Do not call ordinary
+analysis's first incomplete phase and later phases. If the returned analysis
+contains `validation_scope`, continue only its `validation_job_id` through the
+on-demand Bug Validation loop and finish with `orchestrate.py validate-complete`
+on the original project; do not enter full-analysis finalize. Do not call ordinary
 `inspect` or `dispatch`, do not call `pipeline.py prepare`, and do not run a
 full cleanup when a previous `phase_cleanup` succeeded. Revalidate every
 function-level artifact in a resumed specification, verification, or bug
@@ -156,38 +176,40 @@ with `agent-static`.
 
 ### On-demand Bug Validation
 
-`--validate FUNCTION_ID` runs dynamic Bug Validation for a single function that
-already has a schema-v2 `MISMATCH` result from a completed analysis baseline.
-It never starts a fresh analysis, creates a new snapshot, or repeats earlier
-stages.  It is mutually exclusive with `--submodule`, `--knowledge`,
-`--extra-edge`, `--one-phase`, `--resume`, and a new change note.
+`--validate FUNCTION_OR_CANDIDATE_ID` runs dynamic Bug Validation for one
+schema-v3 direct candidate from a completed baseline. A function ID is accepted
+only when its candidate is unique; otherwise use the candidate ID returned by
+inspection. It creates a private probe snapshot without repeating earlier
+analysis stages.  It is mutually exclusive with `--submodule`, `--knowledge`,
+`--extra-edge`, `--one-phase`, `--incremental`, `--resume`, and a new change note.
 
 First verify the baseline and locate the candidate:
 
 ```bash
 <python3> "$FM_AGENT_SKILL_ROOT/scripts/orchestrate.py" validate-inspect \
-  --project "$PROJECT" --function-id "$FUNCTION_ID"
+  --project "$PROJECT" --function-id "$FUNCTION_OR_CANDIDATE_ID"
 ```
 
-If this returns an error (missing baseline, no MISMATCH for that function,
-already confirmed, or an active conflicting lock), report its reason and stop.
+If inspection rejects the baseline, conflicting active snapshot or ambiguous
+function identity, report its reason. An already accepted candidate can be
+revalidated in a new private job without overwriting other accepted origins.
 
-On success, dispatch exactly one Bug Validation job for that function:
+On success, dispatch exactly one Bug Validation job for the resolved candidate:
 
 ```bash
 <python3> "$FM_AGENT_SKILL_ROOT/scripts/orchestrate.py" validate-dispatch \
-  --project "$PROJECT" --function-id "$FUNCTION_ID"
+  --project "$PROJECT" --function-id "$FUNCTION_OR_CANDIDATE_ID"
 ```
 
 This creates a private snapshot from the saved baseline commit and returns
-`project`, `job_id`, and `config`.  Then enter the standard single-function
+`project`, `job_id`, `bug_id`, `candidate_id`, `function_id`, and `config`.  Then enter the standard single-function
 Bug Validation loop below, starting from `durable_executor.py next`.  A single
 function with at most `bug_validation_max_attempts` probes (default 5) and
 `bug_validation_negative_retries + 1` negative attempts (default 3) is bounded
 enough to complete in one turn under normal conditions.
 
 On `dag_converged`, call `orchestrate.py validate-complete --project "$PROJECT"`
-against the original project to publish only that function's result and release
+against the original project to publish only that candidate's result and release
 the temporary snapshot. Do not run `bug_summary.py` or re-report static
 findings from the baseline.
 
@@ -220,7 +242,8 @@ After determining availability, run exactly one stateful dispatch command:
   --note "$CHANGE_NOTE" \
   [--submodule "$PATH"]... \
   [--knowledge "$FILE"]... \
-  [--extra-edge "$FILE_OR_DIR"] [--one-phase] [--codegraph]
+  [--extra-edge "$FILE_OR_DIR"] [--one-phase] [--codegraph] \
+  [--incremental "$INTENT_FILE"] [--all-bugs | --no-all-bugs]
 ```
 
 The bracketed terms are placeholders, not literal shell text: omit an option
@@ -267,9 +290,14 @@ Plan ticket, seals every passed gate, and writes the durable progress state:
 
 On `run_deterministic`, call the same command with `execute`; on
 `dispatch_workers`, launch exactly the returned tickets, submit receipts, then
-call `next` again. Every job carries its semantic phase, but `current_phase`
-is display state, not a scheduling barrier. Never let a Worker mutate scheduler
-state.
+call `next` again. On `validation_ready_to_publish`, run its returned
+`orchestrate.py validate-complete` command against the original project; never
+promote targeted validation through full-analysis `pipeline.py complete`.
+Every job carries its semantic phase, but `current_phase`
+enforces phase ordering. Do not plan or launch verification until the
+specification gate has passed; incremental verification additionally requires
+all contract-update and reconciliation frontiers to converge. Never let a
+Worker mutate scheduler state.
 
 Give a worker only its dispatch-ticket inputs and direct evidence. It writes
 full evidence to its assigned output and returns a ≤4 KiB JSON receipt with
@@ -279,8 +307,8 @@ joining the jobs required by a phase, call
 `scheduler.py phase-receipt --project "$PROJECT" --phase "$PHASE"`; use that
 small receipt as the normal fan-in. Read detailed worker artifacts only for
 listed escalations (`MISMATCH`, `DEPENDENCY_RISK`, `INCONCLUSIVE`, `ERROR`, or
-failure), then call `pipeline.py phase-complete` and emit the short completion
-status. A failed gate means do not enter the next phase. On every exception, tool failure, or user-requested stop, run
+failure), then call the phase driver again; it writes the phase receipt and
+seals the gate automatically. A failed gate means do not enter the next phase. On every exception, tool failure, or user-requested stop, run
 `pipeline.py fail`; when the current phase is still running this records an
 `interrupted` resumable state, while an already recorded failed phase remains
 terminal. It releases its owned lock while preserving artifacts and the active
@@ -329,28 +357,29 @@ but its `phases.json` does not satisfy the current schema, the pipeline
 automatically removes that stale output and requeues only the current
 `phase_plan` job. Do not hand-edit the plan or mark the old job successful.
 
-Then create the complete phase queue in one deterministic operation:
+The driver calls this deterministic planner for its current phase; the same
+command is available for explicit recovery:
 
 ```bash
 <python3> "$FM_AGENT_SKILL_ROOT/scripts/job_planner.py" \
   --project "$PROJECT" --phase "$PHASE"
 ```
 
-Use it for full `specification` and incremental `update_specs`; explicit
-verification/Bug Validation planning remains an idempotent legacy/recovery
-entry point. Incremental `update_specs` retains its read-only
-plan/apply/reconcile workflow described below. Specification registers every
-selected function across every project phase and caller-first layer before the
-first Worker starts, splitting by target tokens, function count, source bytes,
-graph complexity, language, and history. It also creates per-spec-dependent
-verification work for streaming; every schema-valid `MISMATCH` later creates
-its Bug Validator dependency. Do not create
-these jobs manually or defer creation of later layers. The resulting
-`fm_agent_skill/control/job_plans/<phase>.json` must cover the entire current
-scope before that phase gate can pass.
+For full analysis, the driver plans `specification`, then `verification`, then
+`bug_validation` only after each preceding gate succeeds. Full specification
+registers every scoped function with caller-first dependencies and adaptive
+batches. No verification or Bug Validator work is created from a partial prior
+phase. Never manufacture semantic manifests.
 
-For `specification`, `verification`, and `verify_affected`, immediately prepare
-the deterministic semantic execution after planning:
+For incremental `select_scope` and `update_specs`, repeated driver calls create
+only the next module/file selector or top-down review/reconciliation frontier.
+Accepted plans are applied serially; actual native pair differences determine
+invalidation and propagation. A relevant unchanged pair keeps its qualified
+proof. The driver sets `update_complete` only after every frontier settles, then
+plans `verify_affected`. Read [incremental-pipeline.md](../../references/incremental-pipeline.md).
+
+The driver also calls `semantic_executor.py prepare` for its current semantic
+phase. Explicit planning/preparation are idempotent recovery entry points:
 
 ```bash
 <python3> "$FM_AGENT_SKILL_ROOT/scripts/semantic_executor.py" prepare \
@@ -363,7 +392,7 @@ including an `unavailable` contract, must be dispatched to the registered
 FM-Agent reasoner Worker. A zero `worker_jobs_remaining` is valid only when all
 planned artifacts already have current, schema-valid results.
 
-List ready work across the streaming DAG in a host-sized bounded group. This
+List ready work in the current durable DAG in a host-sized bounded group. This
 does not lease any ticket:
 
 ```bash
@@ -416,8 +445,9 @@ Submit semantic receipts only through:
 An invalid artifact or receipt returns `retry_required`; call
 `semantic_executor.py retry --job-id "$JOB_ID"` before obtaining a new ticket.
 Report a timeout or tool failure through `semantic_executor.py fail`; process
-Bug Validator actions through its executor below. After every completion call
-`durable_executor.py next` immediately to refill the free slot. A checkpoint
+Bug Validator actions through its executor below. After every normal-analysis completion call `phase_driver.py next` immediately:
+it applies accepted incremental plans and creates the next frontier before
+refilling the free slot. On-demand validation uses `durable_executor.py next`. A checkpoint
 is only a durable write; it is never a normal reason to end an analysis.
 Continue the loop until the DAG converges, then finish each phase with its
 scheduler receipt; only DAG convergence plus all gates permits finalization.
@@ -537,7 +567,7 @@ Write `MISMATCH` only for a function's own specification violation. If the
 function is affected solely by a mismatching callee, write `DEPENDENCY_RISK`
 with the affected callee IDs and do not send it to Bug Validator. Require the
 Verification Worker to derive actual postcondition A and return the exact
-schema-v2 result envelope from `artifact-contract.md`. A `MISMATCH` without a
+schema-v3 result envelope from `artifact-contract.md`. A `MISMATCH` without a
 normative or inferred B, a concrete counterexample, non-empty reason, and an
 exact offending source quote is invalid: retry it and never schedule it for Bug
 Validator. Do not complete Verification when fewer than half the selected
@@ -586,7 +616,7 @@ cache, never a project-root build output. `build_result.json` can never confirm 
 Bug Validation runs automatically after the verification gate (stage 8 for a
 full run; stage 9 for an incremental run). The Coordinator must run
 `job_planner.py --phase bug_validation` once, then dispatch one dynamic Worker
-job for every current direct `MISMATCH`. A candidate is not reported as
+job for every current direct candidate, each carrying separate candidate and function IDs. A candidate is not reported as
 confirmed until its public-entry probe has completed with matching evidence.
 When there are no candidates, the planner records an empty plan and the phase
 completes without Workers.
@@ -597,8 +627,9 @@ completed.
 
 ### On-demand Bug Validation via --validate
 
-When the user supplies `--validate FUNCTION_ID`, the Coordinator reruns Bug
-Validation **only** for that function's existing MISMATCH candidate, preserving
+When the user supplies `--validate FUNCTION_OR_CANDIDATE_ID`, resolve exactly
+one existing MISMATCH candidate, then rerun Bug Validation **only** for that
+candidate, preserving
 accepted results for other candidates on the same baseline. It must still
 follow the full state-machine loop because a single function can require
 multiple attempts:
@@ -610,8 +641,10 @@ multiple attempts:
    `scheduler_retry` — and immediately call `next` again.
 3. Continue until the executor returns `dag_converged` for that job or an
    explicit exhausted-job failure.
-4. Run `scheduler.py phase-receipt --phase bug_validation` and call
-   `pipeline.py phase-complete` only when `dag_converged` and `gate_ready`.
+4. Once the assigned candidate job succeeds with its accepted receipt, call
+   `orchestrate.py validate-complete` against the original project. Do not use
+   full-analysis `pipeline.py complete` or a full-scope Bug Validation gate for
+   this targeted publication.
 
 A single-function validation with at most 5 runtime attempts × 3 negative
 probes is bounded enough to complete in one turn.  If the host reaches a
@@ -695,7 +728,7 @@ unavailable even when a previous completion file exists.
 
 A function may appear under **confirmed bugs** only when its direct `MISMATCH`
 has a `bug_validation/*.result.json` whose status is `confirmed` and whose
-latest attempt names matching dynamic evidence.  A function with a schema-v2
+latest attempt names matching dynamic evidence.  A function with a schema-v3
 Verification `MISMATCH` but no Bug Validation result is a **static finding**
 (`confirmation_status: static_finding`) — it carries a concrete counterexample
 and exact source quote, but has not been dynamically reproduced.  Report static

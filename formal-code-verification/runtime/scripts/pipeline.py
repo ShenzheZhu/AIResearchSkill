@@ -142,7 +142,10 @@ def main():
             commit = state.git(target, "rev-parse", "HEAD")
             if record.get("snapshot_commit") != commit: raise SystemExit("analysis worktree moved away from its saved snapshot commit")
             submodules = record.get("inputs", {}).get("submodules", [])
-            state.atomic_json(state.skill_dir(target) / "baseline.json", {"schema_version": 5, "baseline_commit": commit, "fingerprint": record["fingerprint"], "inputs": record["inputs"], "source_manifest": state.source_manifest(target, submodules if isinstance(submodules, list) else []), "completed_at": record["ended_at"]})
+            baseline_config = dict(record["inputs"].get("config", {}))
+            baseline_config.pop("incremental_intent", None)
+            baseline_fingerprint = state.fingerprint_for_config(target, baseline_config)[0]
+            state.atomic_json(state.skill_dir(target) / "baseline.json", {"schema_version": 5, "baseline_commit": commit, "fingerprint": baseline_fingerprint, "run_fingerprint": record["fingerprint"], "inputs": record["inputs"], "source_manifest": state.source_manifest(target, submodules if isinstance(submodules, list) else []), "completed_at": record["ended_at"]})
             state.version_log(target, commit)
             set_result_authority(target, True)
             checkpoint.commit(target, "finalize", "succeeded", active_record=record)

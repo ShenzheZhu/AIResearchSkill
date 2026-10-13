@@ -37,13 +37,13 @@ def read_contract(target: Path, bug_id: str, attempt: int, execution_mode: str =
     if not isinstance(contract, dict):
         raise ValueError("missing or invalid reproduction.json")
     expected = {
-        "schema_version", "bug_id", "attempt", "snapshot_commit", "language",
+        "schema_version", "bug_id", "candidate_id", "function_id", "attempt", "snapshot_commit", "language",
         "public_entrypoint", "probe_file", "expected_marker", "not_confirmed_marker",
         "timeout_seconds",
     }
     if set(contract) != expected:
         raise ValueError("reproduction contract has unexpected or missing fields")
-    if contract["schema_version"] != 2 or contract["bug_id"] != bug_id or contract["attempt"] != attempt:
+    if contract["schema_version"] != 3 or contract["bug_id"] != bug_id or contract["attempt"] != attempt or not all(isinstance(contract.get(key), str) and contract[key] for key in ("candidate_id", "function_id")):
         raise ValueError("reproduction contract identity does not match requested attempt")
     if contract["snapshot_commit"] != (snapshot_commit or state.current_snapshot_commit(target)):
         raise ValueError("reproduction contract snapshot does not match current analysis worktree")
@@ -148,8 +148,10 @@ def run(target: Path, bug_id: str, attempt: int) -> dict:
     if result_path.exists():
         raise ValueError(f"reproduction result already exists and is immutable: {result_path}")
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "bug_id": bug_id,
+        "candidate_id": contract["candidate_id"],
+        "function_id": contract["function_id"],
         "attempt": attempt,
         "snapshot_commit": contract["snapshot_commit"],
         "language": contract["language"],

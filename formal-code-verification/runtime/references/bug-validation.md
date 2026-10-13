@@ -1,6 +1,6 @@
 # Bug validation
 
-A schema-v2 direct reasoning `MISMATCH` is a candidate only after the gate has
+A schema-v3 direct reasoning `MISMATCH` is a candidate only after the gate has
 validated normative or inferred specification B, reasoned actual postcondition A, a
 concrete `A ∧ ¬B` counterexample, and an exact offending source quote. It is
 never a confirmed defect. Do not
@@ -75,7 +75,8 @@ reproduction.
 
 ## Fast agent-executed reproduction
 
-For each candidate and attempt:
+For each independent `candidate_id` and attempt (keeping its actual owning
+`function_id` separate):
 
 1. Obtain a candidate descriptor through `durable_executor.py next`, claim it
    immediately with `durable_executor.py claim`,
@@ -84,7 +85,8 @@ For each candidate and attempt:
    assigned `fm_agent_skill/probes/<bug-id>/attempt_<n>/` directory. Do not
    call `bug_validation_executor.py start` again: the durable executor already
    owns the atomic scheduler start transition.
-2. Validate that the contract names the current snapshot, a structured public
+2. Validate that the schema-3 contract names its candidate, actual function,
+   attempt and current snapshot, a structured public
    entry point (`ecosystem`, `kind`, repository-relative `target`, `symbol`),
    a fixed language extension, no shell command, and fixed `CONFIRMED` /
    `NOT CONFIRMED` markers. In `agent-executed` mode every profile uses the
@@ -114,7 +116,11 @@ The final report's last `attempts[]` item must have `ordinal` equal to the
 current overall job attempt and must point at that exact attempt's
 `reproduction_result.json`. A prior negative report never completes a retried
 probe; the host state machine requests finalization again until the current
-dynamic evidence is appended.
+dynamic evidence is appended. Preserve the exact ordered prefix of accepted
+semantic attempts; duplicates, reordering or a dropped inconclusive attempt
+cannot exhaust the negative budget. Each accepted negative outcome seals its
+probe/contract/execution/build records through the same SQLite artifact identity
+as terminal acceptance. Runtime failures may leave ordinal gaps.
 
 `agent-executed` is FM-Agent-compatible quick mode, not a sandbox guarantee.
 The Worker may execute project-scoped commands for any registered language,
@@ -181,18 +187,18 @@ preserving every immutable attempt. Vary only legal inputs or trigger conditions
 keep the candidate identity and source snapshot fixed. A build failure is runtime
 probe evidence only; it cannot reject or confirm a semantic candidate.
 
-On-demand `--validate FUNCTION_ID` preserves accepted reports and private probe
-evidence for other direct MISMATCH candidates on the same compatible baseline.
-It replaces only the selected function's report and probe tree, then rewrites
-the current `summary.json` over all valid retained reports. A full or
-incremental analysis still clears Bug Validation artifacts before creating its
-new current baseline.
+On-demand `--validate` identifies one candidate (a function ID is sufficient
+only when it resolves to one candidate). It preserves other accepted candidate
+reports and private probe evidence on the compatible baseline. A new probe uses
+its own run-qualified job/report/attempt paths; it cannot overwrite an older
+accepted candidate's authority.
 
-For incremental analysis, consider only direct `MISMATCH` results whose
-`function_id` is in `incremental_decision.json.included`. Replace the current
-Coordinator-authored `summary.json` with the current snapshot commit and exact
-candidate/confirmed/rejected/inconclusive counts; never reuse older reports or
-probes as current confirmation:
+Incremental planning validates newly affected direct candidates. The summary
+also resolves unchanged candidates through their explicit retained origins and
+original accepted receipts. Never relabel their old snapshots or claim they
+were executed again. Historical reports not selected by a current candidate's
+accepted job path are ignored. Replacing the current summary does not erase
+historical probes or accepted receipts:
 
 ```bash
 <python3> "$FM_AGENT_SKILL_ROOT/scripts/bug_summary.py" \

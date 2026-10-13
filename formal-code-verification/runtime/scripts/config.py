@@ -9,7 +9,7 @@ from _common import project, state
 from fm_agent_core.languages import probe_adapter_choices
 
 DEFAULTS = {
-    "submodules": [], "one_phase": False,
+    "submodules": [], "one_phase": False, "all_bugs": False,
     "scheduler_executor": "host-subagent",
     "max_active_subagents": 16,
     # Same-layer specification batches are independent after their caller
@@ -46,6 +46,8 @@ def load(target):
         raise ValueError(
             "saved bug_validation_execution must be agent-executed or adapter"
         )
+    if not isinstance(result["all_bugs"], bool):
+        raise ValueError("saved all_bugs must be a boolean")
     return result
 
 
@@ -59,6 +61,7 @@ def main():
     parser.add_argument("--project", required=True)
     parser.add_argument("--submodule", dest="submodules", action="append")
     parser.add_argument("--one-phase", choices=("true", "false"))
+    parser.add_argument("--all-bugs", choices=("true", "false"))
     parser.add_argument("--max-active-subagents", type=int)
     parser.add_argument("--spec-concurrency", type=int)
     parser.add_argument("--verify-concurrency", type=int)
@@ -97,7 +100,7 @@ def main():
             if value is not None: config[key] = value
         if args.submodules is not None: config["submodules"] = args.submodules
         if args.knowledge is not None: config["knowledge"] = args.knowledge
-        for key in ("one_phase",):
+        for key in ("one_phase", "all_bugs"):
             value = getattr(args, key)
             if value is not None: config[key] = value == "true"
         for key in ("max_active_subagents", "spec_concurrency", "verify_concurrency", "bug_validation_concurrency", "bug_validation_finalize_concurrency", "read_only_plan_concurrency", "worker_target_tokens", "worker_max_functions", "worker_max_source_bytes", "worker_lease_seconds", "bug_validation_max_attempts", "granularity", "retries", "lock_ttl_seconds", "resume_grace_seconds"):

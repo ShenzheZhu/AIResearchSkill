@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 
 from _common import project, state
@@ -28,37 +29,46 @@ def reset(target):
         "incremental_*.log", "workflow_*.md",
     ):
         native.extend(fm.glob(pattern))
-    skill = [control / name for name in ("analysis_index.json", "call_graph_precision.json", "graph_edges.json", "agent_static_edges.json", "preserved_specs.json", "diff.json", "incremental_decision.json", "phase_receipts", "job_plans")]
+    skill = [control / name for name in ("baseline_validation.json", "analysis_index.json", "call_graph_precision.json", "graph_edges.json", "agent_static_edges.json", "preserved_specs.json", "retained_evidence.json", "diff.json", "incremental_decision.json", "phase_receipts", "job_plans")]
     for path in native + skill + [state.skill_dir(target) / "jobs", state.skill_dir(target) / "worker_reports", state.skill_dir(target) / "probes", state.skill_dir(target) / "runs"]: remove(path)
     scheduler.clear_run(target)
     return {"ok": True, "preserved": str(fm / "phases.json")}
 
 
 def reset_incremental_artifacts(target):
-    """Discard transient incremental outputs while retaining hash-checked results.
+    """Discard transient incremental outputs while retaining qualified results.
 
     `executor.py diff` removes verification results for changed/removed functions.
     Unchanged results are required to keep the next baseline complete.
     """
     fm = state.fm_dir(target)
-    paths = [fm / name for name in ("bug_validation", "incremental_updated_specs.json", "trace")]
+    paths = [fm / name for name in ("incremental_updated_specs.json", "trace")]
     for pattern in (
         "select_relevant_modules.md", "relevant_modules.json",
         "select_relevant_files_*.md", "relevant_files_*.json",
         "spec_update_*.md", "spec_update_*.json", "incremental_*.log",
     ):
         paths.extend(fm.glob(pattern))
-    paths += [state.control_dir(target) / "graph_edges.json", state.control_dir(target) / "agent_static_edges.json", state.control_dir(target) / "phase_receipts", state.control_dir(target) / "job_plans", state.skill_dir(target) / "jobs", state.skill_dir(target) / "worker_reports", state.skill_dir(target) / "probes", state.skill_dir(target) / "runs"]
+    paths += [state.control_dir(target) / name for name in (
+        "phase_receipts", "preserved_specs.json", "restored_specs.json", "diff.json", "incremental_decision.json",
+    )]
+    # Old Bug Validation plans still locate accepted baseline jobs until the
+    # preserve phase records their exact origins in retained_evidence.json.
     for path in paths:
         remove(path)
-    scheduler.clear_run(target)
     return {"ok": True, "preserved": str(fm / "extracted_functions")}
 
 
 def clear_transient(target):
     """Discard Worker reports while retaining accepted results and their evidence."""
-    remove(state.skill_dir(target) / "worker_reports")
-    return {"ok": True}
+    root = state.skill_dir(target) / "worker_reports"
+    for path in root.glob("*.json") if root.is_dir() else []:
+        job = state.read_json(state.skill_dir(target) / "jobs" / path.name, {})
+        if job.get("type") != "incremental_spec_plan" or job.get("status") != "succeeded":
+            path.unlink()
+    if root.is_dir() and not any(root.iterdir()):
+        root.rmdir()
+    return {"ok": True, "preserved": "accepted incremental review reports"}
 
 
 def main():

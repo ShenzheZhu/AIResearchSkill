@@ -42,7 +42,21 @@ On successful finalize, `baseline.json` records a content-addressed manifest
 of production sources from the private snapshot. Dynamic validation and no-op
 selection compare this manifest with the current worktree, not merely Git
 `HEAD`; a baseline created from uncommitted changes remains usable until those
-source contents change.
+source contents change. A new developer goal can still require incremental
+analysis on identical source. Pure configuration compatibility omits the
+captured goal, while the exact run fingerprint includes it and `all_bugs` so
+old accepted evidence cannot be rebound to the new reasoning run.
+
+Before incremental extraction replaces baseline artifacts, seal
+`control/baseline_validation.json` with the analyzed snapshot, pure config
+fingerprint and exact saved baseline record. Later resume validates this receipt
+and baseline Git ref rather than rereading intentionally replaced old outputs.
+`retained_evidence.json` records exact original proof bytes, native pairs, source
+blobs and candidate receipts with their actual origin snapshots. Preserve old
+jobs/reports/probes through incremental cleanup; only qualified unchanged-file
+rows are reused. New plan and candidate IDs include the current run identity.
+Verification waits until every contract/reconciliation frontier settles and
+`update_complete` is true.
 
 `current/` uses `copy2`, not hard links: a replaceable mirror sharing an inode
 with an object could corrupt the supposedly immutable object store.
@@ -53,7 +67,7 @@ An ordinary `orchestrate.py dispatch` automatically continues through the
 same path as explicit `--resume` whenever an active run exists. A live private
 snapshot can continue before its first sealed phase; when that cache is gone,
 `refs/fm-agent-skill/active` and a complete checkpoint reconstruct it. In both
-cases verify the snapshot, fingerprint, saved configuration, runtime version,
+cases verify the snapshot, fingerprint, saved configuration (including captured goal and all-bugs mode), runtime version,
 and Worker-definition hash, recover interrupted jobs, immediately requeue
 retryable jobs, and continue the first unfinished task. If neither a verified
 live snapshot nor a ref-plus-complete-checkpoint exists, return the exact

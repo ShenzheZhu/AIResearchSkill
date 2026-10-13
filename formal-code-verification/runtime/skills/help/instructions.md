@@ -28,14 +28,15 @@ language examples such as “analyze the current Git project with FM-Agent” or
 
 ## Explain automatic mode selection
 
-Explain that users do not choose a low-level full or incremental flag. The
-`run` skill deterministically inspects the baseline and chooses:
+Explain that `run` automatically selects a mode. Users can supply an explicit
+latest goal through `--incremental INTENT.md` (non-empty Markdown) and `--note`;
+explicit incremental requires a compatible completed baseline. Inspection chooses:
 
 | Condition | Mode |
 | --- | --- |
 | No compatible successful baseline | Full analysis |
-| Compatible baseline and no supported source-file change | No-op |
-| Compatible baseline and supported source-file change | Incremental analysis |
+| Compatible baseline, identical supported source, and no new captured intent | No-op |
+| Compatible baseline and changed supported source or new captured intent | Incremental analysis |
 
 A baseline is reusable only when its scope and configuration fingerprint,
 function artifacts, specifications, verification results, and Git commit remain
@@ -43,17 +44,22 @@ compatible. A scope, knowledge-file, or supplemental-edge change deliberately
 causes full analysis.
 
 A source-file change means an added, modified, or deleted file whose extension
-is supported by the Skill. Documentation-only changes do not start an
-incremental analysis.
+is supported by the Skill. Documentation-only changes do not start analysis
+unless supplied as a new explicit developer goal. A completed identical intent
+with unchanged source is a no-op. Module/file/function Workers review relevant
+unchanged functions to find omitted work; actual contract differences drive
+propagation. Functions in changed files are conservatively reverified to cover
+imports, constants, types and global-state changes.
 
 ## Explain resume
 
-Explain that resume is explicit: the user asks to continue an interrupted
-analysis or supplies `--resume`. It preserves the active analysis and starts at the
+Explain that ordinary run automatically continues a compatible interrupted
+analysis; the user can also supply `--resume`. It preserves the active analysis and starts at the
 first incomplete stage. It is accepted only when supported-source content and
 the run's saved scope, knowledge files, supplemental edges, and other effective
 configuration still match. A commit containing identical source content does
-not prevent resume.
+not prevent resume. Omitted `--all-bugs` inherits the interrupted mode;
+an explicit contrary `--all-bugs`/`--no-all-bugs` is rejected.
 
 When a lock has a fresh heartbeat, explain that another agent may still be
 working. Do not claim a takeover occurred unless the user explicitly confirmed
@@ -95,7 +101,14 @@ Currently, the Skill supports a full `run_pipeline`, automatic baseline-driven
 full/incremental/no-op selection, and safe explicit resume of an interrupted
 full or incremental run.
 
-Scripts coordinate Skill state and validate artifacts.
+`--all-bugs` continues reasoning after independent direct mismatches and
+records separate candidate identities; default mode admits one candidate per
+function. Complete reasoning and explicit loop obligations are required for
+conclusive outputs. `--validate` accepts a unique-candidate function ID or an
+explicit candidate ID; each validation retains separate probe/receipt evidence.
+
+Scripts coordinate Skill state and validate artifacts. Retained results keep
+their original evidence snapshots; they are not reported as newly executed.
 
 The coding agent performs repository understanding, specification writing, and reasoning during the `run` workflow.
 

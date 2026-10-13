@@ -20,15 +20,15 @@ class FinalizationIdentityTest(unittest.TestCase):
     def write_execution(self, target: Path, attempt: int) -> str:
         root = target / f"fm_agent_skill/probes/candidate/attempt_{attempt:03d}"
         entrypoint = {"ecosystem": "host-project-toolchain", "kind": "module", "target": "calc.py", "symbol": "inc"}
-        state.atomic_json(root / "reproduction.json", {
-            "schema_version": 2, "bug_id": "candidate", "attempt": attempt,
+        state.atomic_json(root / "reproduction.json", {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"),
+            "schema_version": 3, "bug_id": "candidate", "attempt": attempt,
             "snapshot_commit": "snapshot", "language": "python", "public_entrypoint": entrypoint,
             "probe_file": "probe.py", "expected_marker": "CONFIRMED",
             "not_confirmed_marker": "NOT CONFIRMED", "timeout_seconds": 30,
         })
         (root / "probe.py").write_text('print("CONFIRMED")\n', encoding="utf-8")
-        state.atomic_json(root / "reproduction_result.json", {
-            "schema_version": 1, "execution_mode": "agent-executed", "bug_id": "candidate",
+        state.atomic_json(root / "reproduction_result.json", {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"),
+            "schema_version": 2, "execution_mode": "agent-executed", "bug_id": "candidate",
             "attempt": attempt, "snapshot_commit": "snapshot", "language": "python",
             "public_entrypoint": entrypoint, "state": "completed", "classification": "confirmed",
             "reason": "The executed probe reproduced the mismatch",
@@ -45,20 +45,21 @@ class FinalizationIdentityTest(unittest.TestCase):
                 target = Path(temporary).resolve()
                 state.atomic_json(state.skill_dir(target) / "active.json", {
                     "mode": "full", "status": "running", "snapshot_commit": "snapshot",
-                    "fingerprint": "identity-test", "phases": ["bug_validation"], "current_phase": "bug_validation",
+                    "validation_scope": ["calc.py::inc"], "fingerprint": "identity-test", "phases": ["bug_validation"], "current_phase": "bug_validation",
                 })
                 job = scheduler.create(target, {
                     "id": "bug-validation-candidate", "phase": "bug_validation", "type": "bug_validate",
                     "depends_on": [], "artifacts": [], "required_outputs": ["fm_agent/bug_validation/candidate.result.json"],
-                    "input": {"bug_id": "candidate", "function_id": "calc.py::inc", "mode": "full"},
+                    "input": {"candidate_id": state.candidate_id("calc.py::inc"), "bug_id": "candidate", "function_id": "calc.py::inc", "mode": "full"},
                 })
                 scheduler.transition(target, job["id"], "start", None, None, "execution")
                 evidence = self.write_execution(target, 1)
                 self.assertEqual(bug_validation_executor.submit_agent_execution(target, job["id"])["pass"], "finalization")
-                report = {
+                report = {"candidate_id": state.candidate_id("calc.py::inc"), "function_id": "calc.py::inc", "schema_version": 2, "bug_id": "candidate",
                     "snapshot_commit": "snapshot", "confirmation_status": "confirmed",
                     "attempts": [{"ordinal": 1, "classification": "confirmed", "dynamic_evidence": {"reproduction_result": evidence}}],
                 }
+                report.pop("function_id", None)
                 if invalid_identity is not None:
                     report["function_id"] = invalid_identity
                 state.atomic_json(target / job["required_outputs"][0], report)
@@ -78,7 +79,7 @@ class FinalizationIdentityTest(unittest.TestCase):
                 state.atomic_json(target / job["required_outputs"][0], report)
                 accepted = bug_validation_executor.submit_finalization(target, job["id"])
                 self.assertEqual(accepted["status"], "succeeded")
-                self.assertEqual(accepted["summary"]["total_confirmed"], 1)
+                self.assertEqual(scheduler._load(target, job["id"])["result"]["classification"], "confirmed")
 
 
 if __name__ == "__main__":

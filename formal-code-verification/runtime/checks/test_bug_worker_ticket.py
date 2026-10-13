@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
+from result_fixture import verification_result
 
 from fm_agent_core import state
 import bug_validation_executor
@@ -39,34 +40,31 @@ class BugWorkerTicketTest(unittest.TestCase):
             artifact = state.fm_dir(target) / "extracted_functions" / entry["artifact"]
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text((target / entry["path"]).read_text(), encoding="utf-8")
-            state.atomic_json(Path(f"{artifact}.spec.json"), {"pre_condition": "value is an integer", "post_condition": "returns value + 2"})
+            state.atomic_json(Path(f"{artifact}.spec.json"), {"signature": entry["id"], "pre_condition": "value is an integer", "post_condition": "returns value + 2"})
             state.atomic_json(Path(f"{artifact}.info.json"), {"callees": []})
         state.atomic_json(state.control_dir(target) / "graph_edges.json", {
             "edges": [{"caller_artifact": "caller-call-1.py", "callee_artifact": "calc-inc-1.py"}],
         })
-        state.atomic_json(state.fm_dir(target) / "logic_verification_results/calc-inc-1.json", {
-            "schema_version": 2, "function_id": "calc.py::inc", "snapshot_commit": "unversioned", "verdict": "MISMATCH",
-            "reasoning": {"actual_postcondition": "returns value + 1", "spec_postcondition": "returns value + 2",
-                          "counterexample": "value=0 returns 1 instead of 2", "offending_statements": "return value + 1"},
-        })
+        state.atomic_json(state.fm_dir(target) / "logic_verification_results/calc-inc-1.json", verification_result(function_id="calc.py::inc", snapshot_commit="unversioned", verdict="MISMATCH", reasoning={"actual_postcondition": "returns value + 1", "spec_postcondition": "returns value + 2",
+                          "counterexample": "value=0 returns 1 instead of 2", "offending_statements": "return value + 1", "reason": "The return differs from the required value"}))
         job = scheduler.create(target, {
             "id": "bug-validation-candidate", "type": "bug_validate", "phase": "bug_validation",
             "depends_on": [], "artifacts": [], "required_outputs": ["fm_agent/bug_validation/candidate.result.json"],
-            "input": {"bug_id": "candidate", "function_id": "calc.py::inc", "mode": "full"},
+            "input": {"candidate_id": state.candidate_id("calc.py::inc"), "bug_id": "candidate", "function_id": "calc.py::inc", "mode": "full"},
         })
         return scheduler.transition(target, job["id"], "start", None, None, "execution")
 
     def execution(self, target: Path) -> Path:
         root = bug_validation_executor.attempt_dir(target, "candidate", 1)
         entry = {"ecosystem": "host-project-toolchain", "kind": "module", "target": "calc.py", "symbol": "inc"}
-        state.atomic_json(root / "reproduction.json", {
-            "schema_version": 2, "bug_id": "candidate", "attempt": 1, "snapshot_commit": "unversioned",
+        state.atomic_json(root / "reproduction.json", {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"),
+            "schema_version": 3, "bug_id": "candidate", "attempt": 1, "snapshot_commit": "unversioned",
             "language": "python", "public_entrypoint": entry, "probe_file": "probe.py", "timeout_seconds": 30,
             "expected_marker": "CONFIRMED", "not_confirmed_marker": "NOT CONFIRMED",
         })
         (root / "probe.py").write_text('print("CONFIRMED")\n', encoding="utf-8")
-        state.atomic_json(root / "reproduction_result.json", {
-            "schema_version": 1, "execution_mode": "agent-executed", "bug_id": "candidate", "attempt": 1,
+        state.atomic_json(root / "reproduction_result.json", {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"),
+            "schema_version": 2, "execution_mode": "agent-executed", "bug_id": "candidate", "attempt": 1,
             "snapshot_commit": "unversioned", "language": "python", "public_entrypoint": entry,
             "state": "completed", "classification": "confirmed", "reason": "The recorded probe contradicted the contract",
             "commands": [{"command": "python3 probe.py", "cwd": root.relative_to(target).as_posix(), "returncode": 0,

@@ -30,15 +30,15 @@ class MixedValidationOutcomesTest(unittest.TestCase):
             job = scheduler.create(target, {
                 "id": "bug-validation-mixed", "phase": "bug_validation", "type": "bug_validate",
                 "artifacts": [], "depends_on": [], "required_outputs": [output], "negative_retries": 2,
-                "input": {"bug_id": "mixed", "function_id": "calc.py::inc", "mode": "full"},
+                "input": {"candidate_id": state.candidate_id("calc.py::inc"), "bug_id": "mixed", "function_id": "calc.py::inc", "mode": "full"},
             })
             attempts = []
             for ordinal in range(1, 4):
                 job = scheduler.transition(target, job["id"], "start", None, None, "execution")
                 root = validator.attempt_dir(target, "mixed", ordinal)
                 entry = {"ecosystem": "host-project-toolchain", "kind": "module", "target": "calc.py", "symbol": "inc"}
-                state.atomic_json(root / "reproduction.json", {
-                    "schema_version": 2, "bug_id": "mixed", "attempt": ordinal, "snapshot_commit": "unversioned",
+                state.atomic_json(root / "reproduction.json", {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"),
+                    "schema_version": 3, "bug_id": "mixed", "attempt": ordinal, "snapshot_commit": "unversioned",
                     "language": "python", "public_entrypoint": entry, "probe_file": "probe.py", "timeout_seconds": 30,
                     "expected_marker": "CONFIRMED", "not_confirmed_marker": "NOT CONFIRMED",
                 })
@@ -51,14 +51,14 @@ class MixedValidationOutcomesTest(unittest.TestCase):
                                  "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}]
                 classification = "not_reproduced" if commands else "inconclusive"
                 evidence = (root / "reproduction_result.json").relative_to(target).as_posix()
-                state.atomic_json(target / evidence, {
-                    "schema_version": 1, "execution_mode": "agent-executed", "bug_id": "mixed", "attempt": ordinal,
+                state.atomic_json(target / evidence, {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"),
+                    "schema_version": 2, "execution_mode": "agent-executed", "bug_id": "mixed", "attempt": ordinal,
                     "snapshot_commit": "unversioned", "language": "python", "public_entrypoint": entry,
                     "state": "completed" if commands else "unsupported", "classification": classification,
                     "commands": commands, "reason": "Public probe ran" if commands else "Required service unavailable",
                 })
                 attempts.append({"ordinal": ordinal, "classification": classification, "dynamic_evidence": {"reproduction_result": evidence}})
-                report = {"function_id": "calc.py::inc", "snapshot_commit": "unversioned",
+                report = {"candidate_id": state.candidate_id("calc.py::inc"), "schema_version": 2, "bug_id": "mixed", "function_id": "calc.py::inc", "snapshot_commit": "unversioned",
                           "confirmation_status": "inconclusive", "attempts": attempts}
                 state.atomic_json(target / output, report)
                 receipt = validator.canonical_finalization_receipt(target, job)

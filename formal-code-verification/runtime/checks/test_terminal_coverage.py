@@ -26,13 +26,14 @@ class TerminalCoverageTest(unittest.TestCase):
         return [{"function_id": "calc.py::inc", "verdict": "MISMATCH"}]
 
     def build(self, target: Path, verification: list[dict]) -> dict:
+        verification = [{**value, "candidates": [{"candidate_id": state.candidate_id(value["function_id"])}]} if value.get("verdict") == "MISMATCH" else value for value in verification]
         with patch.object(checkpoint, "validate", return_value={"snapshot_commit": "unversioned", "checkpoint_id": "sealed"}), \
              patch.object(terminal_report, "_verification_results", return_value=verification):
             return terminal_report.build(target)
 
     def row(self, *, status="failed", evidence=None, row_id="public-result", function_id="calc.py::inc", requirement="returns x + 2") -> dict:
         return {
-            "id": row_id, "flow": "Public calc entry", "function_id": function_id, "requirement": requirement,
+            "id": row_id, "flow": "Public calc entry", "function_id": function_id, "candidate_id": state.candidate_id(function_id), "requirement": requirement,
             "status": status, "limitation": "One recorded probe covers this input only",
             "evidence": evidence if evidence is not None else [{
                 "level": "actual-code", "path": "fm_agent_skill/probes/candidate/attempt_001/reproduction_result.json",

@@ -52,7 +52,10 @@ Keep their full definitions, tickets, allowed paths, and runtime gates unchanged
    counterexamples, then validate candidates against actual code through the
    runtime's existing Bug Validation execution. After a real reproduction,
    correct mistaken model assumptions, revisit affected callers/flows, and
-   rerun the relevant existing stages. Preserve the governing requirement and
+   rerun the relevant existing stages. After a completed baseline, use incremental
+   selection with both the source differences and the developer's goal; include
+   necessary consumers the patch omitted. Reuse qualified unchanged evidence at
+   its original origin instead of repeating unrelated batches. Preserve the governing requirement and
    prior evidence; do not repair a violated Q by redefining intended behavior.
 4. **Account for coverage.** Maintain the ledger below as evidence arrives.
    Deduplicate by business obligation, observable path, and failure mode: several
@@ -102,10 +105,14 @@ Record the ledger before finalization. Its minimal schema is:
 
 Evidence entries name a project-relative `path` and a `level`: `reasoning`,
 `actual-code`, `integration`, or `machine-verifier`. A passed/failed native
-Bug Validation row also names its assigned `function_id`; its `requirement`
+Bug Validation row also names its assigned `function_id` and independent
+`candidate_id`; its `requirement`
 must exactly equal that function's independently derived `.spec.json`
 `post_condition`. The current source index, planned job, accepted receipt and
-named execution attempt must all belong to that assignment and snapshot.
+named execution attempt must all belong to that assignment. New evidence belongs
+to the active snapshot; retained evidence must have a qualified original snapshot
+and exact original receipt, execution files and result bytes. Never relabel an
+old execution as one performed against the new snapshot.
 Reusing a budget-check probe for a persistence postcondition is invalid even
 when both are part of the same flow. Native Bug Validation receipts qualify
 only `actual-code`: calling one `integration` or `machine-verifier` does not
@@ -114,6 +121,8 @@ independently validate the relevant evidence type; do not invent an adapter.
 `confirmed` supports the assigned failed obligation. A successful negative
 probe supports only that exact postcondition for its recorded inputs and
 schedule, which must be stated in `limitation`; it never passes the whole flow.
+Each independently derived candidate needs its own validation. Multiple probes
+for one candidate are attempts, not additional defects or broader coverage.
 Unsupported, inconclusive, raw build logs and other unvalidated records keep
 the obligation unknown. Unknown rows remain visible without a function
 binding and may link reasoning or external-tool artifacts. After execution,

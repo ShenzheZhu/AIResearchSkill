@@ -16,8 +16,8 @@ unavailable attempts when the negative retry budget ends.
 ## Preparation pass
 
 Read the assigned verification result, production source, extracted artifact,
-and permitted call-graph evidence. Treat its structured `reasoning` fields as
-the candidate oracle: `spec_postcondition` is expected behavior,
+and permitted call-graph evidence. Select only the exact ticket `candidate_id` from its `candidates` array.
+Treat the ticket's `candidate_reasoning` fields as the candidate oracle: `spec_postcondition` is expected behavior,
 `actual_postcondition` is the reasoned implementation behavior, and
 `counterexample` plus `offending_statements` identify the trigger. Reject a
 candidate that lacks these validated fields. Find the smallest public entry
@@ -34,8 +34,10 @@ fm_agent_skill/probes/<bug-id>/attempt_<n>/
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "bug_id": "...",
+  "candidate_id": "exact assigned candidate_id",
+  "function_id": "actual owning function_id",
   "attempt": 1,
   "snapshot_commit": "...",
   "language": "one canonical LanguageProfile key assigned in the job manifest",
@@ -118,7 +120,9 @@ required output is `reproduction_result.json`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "candidate_id": "exact assigned candidate_id",
+  "function_id": "actual owning function_id",
   "execution_mode": "agent-executed",
   "bug_id": "...",
   "attempt": 1,
@@ -147,7 +151,11 @@ host-transcribed execution receipt.
 
 After the Coordinator supplies `reproduction_result.json`, write the assigned
 detail Markdown report and exactly one assigned
-`fm_agent/bug_validation/*.result.json`. Append one attempt; never overwrite
+`fm_agent/bug_validation/*.result.json`. Its identity fields are exactly
+`schema_version: 2`, `bug_id`, `candidate_id`, `function_id`, and
+`snapshot_commit` from the ticket, alongside `confirmation_status` and
+`attempts`. A result for another violation in the same function never covers
+this candidate. Append one attempt; never overwrite
 earlier evidence. Each attempt contains `ordinal`, `classification`,
 `trigger`, `probe`, `output`, `dynamic_evidence`, and `timestamp`.
 Set `ordinal` to the current overall Bug Validator job attempt supplied by the

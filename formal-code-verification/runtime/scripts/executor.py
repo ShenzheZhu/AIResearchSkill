@@ -271,26 +271,70 @@ def graph(target: Path, codegraph_export: Path | None = None) -> dict:
     return {"layers": written, "function_count": len(functions), "edge_count": len(edges), "backend": backend}
 
 
+def validate_baseline(target: Path) -> dict:
+    config = dict(state.active_record(target).get("inputs", {}).get("config", {}))
+    config.pop("incremental_intent", None)
+    fingerprint = state.fingerprint_for_config(target, config)[0]
+    baseline = state.inspect_baseline(target, fingerprint, config.get("submodules", []))
+    if not baseline.get("valid"):
+        raise ValueError("incremental baseline validation failed: " + baseline.get("reason", "unavailable"))
+    receipt = {"schema_version": 1, "snapshot_commit": state.current_snapshot_commit(target),
+               "config_fingerprint": fingerprint, "baseline": baseline["saved"]}
+    state.atomic_json(state.control_dir(target) / "baseline_validation.json", receipt)
+    return {"ok": True, "baseline_commit": baseline["commit"], "function_count": baseline["function_count"]}
+
+
 def preserve_specs(target: Path) -> dict:
-    root = state.fm_dir(target) / "extracted_functions"; saved = {}
+    root = state.fm_dir(target) / "extracted_functions"; saved = {}; retained = {}
     manifest = state.read_json(state.fm_dir(target) / "extraction_manifest.json", {}).get("functions", [])
     source_for = {item.get("artifact"): item.get("source_path") for item in manifest if isinstance(item, dict)}
     baseline = state.baseline_commit(target)
     changed_files = state.changed_source_paths(target, baseline) if baseline else set()
-    for artifact in root.rglob("*") if root.is_dir() else []:
-        if not artifact.is_file() or state.is_metadata_sidecar(artifact): continue
+    old_functions = (state.source_index(target) or {}).get("functions", [])
+    baseline_record = state.read_json(state.skill_dir(target) / "baseline.json", {})
+    candidates = state.direct_candidates(target, snapshot_commit=baseline)
+    for item in old_functions:
+        rel = item["artifact"]
+        artifact = root / rel
         spec, info = Path(f"{artifact}.spec.json"), Path(f"{artifact}.info.json")
         if spec.is_file() and info.is_file():
-            rel = artifact.relative_to(root).as_posix()
             source_path = source_for.get(rel)
-            if source_path not in changed_files:
-                saved[rel] = {"source_path": source_path, "spec": state.read_json(spec, {}), "info": state.read_json(info, {})}
-    data = {"schema_version": 2, "generated_at": state.now(), "baseline_commit": baseline, "artifacts": saved}
-    state.atomic_json(state.control_dir(target) / "preserved_specs.json", data); return {"preserved": len(saved)}
+            pair = {"source_path": source_path, "spec": state.read_json(spec, {}), "info": state.read_json(info, {})}
+            saved[rel] = pair
+            if source_path in changed_files or not isinstance(source_path, str) or not (target / source_path).is_file():
+                continue
+            prior = state.retained_function(target, item["id"], baseline)
+            if prior:
+                retained[item["id"]] = prior
+                continue
+            validations = []
+            for candidate_id, candidate in candidates.items():
+                if candidate["function_id"] != item["id"]:
+                    continue
+                job = state.accepted_candidate(target, candidate_id, baseline)
+                validations.append({"candidate_id": candidate_id, "job_id": job["id"],
+                                    "snapshot_commit": baseline,
+                                    "input_fingerprint": baseline_record.get("run_fingerprint", baseline_record["fingerprint"]),
+                                    "result_path": job["bug_result_path"]})
+            retained[item["id"]] = {
+                "artifact": rel, **pair,
+                "source_blob": state.git(target, "rev-parse", f"{baseline}:{source_path}"),
+                "verification_snapshot_commit": baseline,
+                "verification_bytes": (state.fm_dir(target) / "logic_verification_results" / Path(rel).with_suffix(".json")).read_bytes().decode("utf-8"),
+                "bug_validations": validations,
+            }
+    data = {"schema_version": 3, "snapshot_commit": state.current_snapshot_commit(target), "generated_at": state.now(), "baseline_commit": baseline,
+            "functions": old_functions, "artifacts": saved,
+            "edges": state.read_json(state.control_dir(target) / "graph_edges.json", {}).get("edges", [])}
+    state.atomic_json(state.control_dir(target) / "preserved_specs.json", data)
+    state.atomic_json(state.control_dir(target) / "retained_evidence.json", {
+        "schema_version": 1, "snapshot_commit": state.current_snapshot_commit(target), "functions": retained,
+    })
+    return {"preserved": len(saved), "retained": len(retained)}
 
 
 def restore_specs(target: Path) -> dict:
-    """Restore only unchanged paired sidecars after a fresh extraction."""
+    """Restore existing B/expected-callee contracts for review after fresh extraction."""
     saved = state.read_json(state.control_dir(target) / "preserved_specs.json", {}).get("artifacts", {})
     root = state.fm_dir(target) / "extracted_functions"; restored = []
     for rel, value in saved.items() if isinstance(saved, dict) else []:
@@ -308,7 +352,7 @@ def restore_specs(target: Path) -> dict:
 
 def diff(target: Path) -> dict:
     preserved = state.read_json(state.control_dir(target) / "preserved_specs.json", {})
-    old = preserved.get("artifacts", {})
+    old = {item["artifact"]: item for item in preserved.get("functions", [])}
     current = {item["artifact"]: item for item in state.source_index(target).get("functions", [])} if state.source_index(target) else {}
     manifest = state.read_json(state.fm_dir(target) / "extraction_manifest.json", {}).get("functions", [])
     source_for = {item.get("artifact"): item.get("source_path") for item in manifest if isinstance(item, dict)}
@@ -321,7 +365,7 @@ def diff(target: Path) -> dict:
     results = state.fm_dir(target) / "logic_verification_results"
     for artifact in set(file_changed) | set(modified) | set(removed):
         (results / Path(artifact).with_suffix(".json")).unlink(missing_ok=True)
-    data = {"schema_version": 1, "generated_at": state.now(), "added": added, "modified": modified, "removed": removed, "file_changes": sorted(changed_files), "file_changed_artifacts": file_changed}
+    data = {"schema_version": 1, "snapshot_commit": state.current_snapshot_commit(target), "generated_at": state.now(), "added": added, "modified": modified, "removed": removed, "file_changes": sorted(changed_files), "file_changed_artifacts": file_changed}
     state.atomic_json(state.control_dir(target) / "diff.json", data); return data
 
 
@@ -331,28 +375,33 @@ def select(target: Path) -> dict:
     functions = state.source_index(target).get("functions", []) if state.source_index(target) else []
     by_artifact = {item.get("artifact"): item.get("id") for item in functions}
     included = {item["id"]: "file-change" for item in functions if item.get("artifact") in affected}
-    edges = state.read_json(state.control_dir(target) / "graph_edges.json", {}).get("edges", [])
-    changed = True
-    while changed:
-        changed = False
-        for edge in edges if isinstance(edges, list) else []:
-            if not isinstance(edge, dict): continue
-            caller, callee = edge.get("caller_artifact"), edge.get("callee_artifact")
-            caller_id, callee_id = by_artifact.get(caller), by_artifact.get(callee)
-            if caller_id in included and callee_id and callee_id not in included: included[callee_id] = "callee-propagation"; changed = True
-            if callee_id in included and caller_id and caller_id not in included: included[caller_id] = "caller-propagation"; changed = True
+    removed = set(changes.get("removed", []))
+    previous = state.read_json(state.control_dir(target) / "preserved_specs.json", {})
+    for edge in previous.get("edges", []):
+        caller_id = by_artifact.get(edge.get("caller_artifact"))
+        if edge.get("callee_artifact") in removed and caller_id:
+            included[caller_id] = "removed-callee"
     excluded = {item["id"]: "unchanged" for item in functions if item.get("id") not in included}
-    data = {"schema_version": 1, "generated_at": state.now(), "included": included, "excluded": excluded, "removed_artifacts": changes.get("removed", [])}
-    state.atomic_json(state.control_dir(target) / "incremental_decision.json", data); return {"included": len(included), "excluded": len(excluded), "removed": len(data["removed_artifacts"])}
+    data = {"schema_version": 1, "snapshot_commit": state.current_snapshot_commit(target),
+            "generated_at": state.now(), "included": included, "review": dict(included),
+            "excluded": excluded, "removed_artifacts": changes.get("removed", []),
+            "pending_review": dict(included), "pending_reconcile": {}, "reviewed": {},
+            "processed_jobs": [], "selection_complete": False, "update_complete": False}
+    state.atomic_json(state.control_dir(target) / "incremental_decision.json", data)
+    import incremental
+    for function_id, reason in list(included.items()):
+        incremental.invalidate(target, data, function_id, reason)
+    incremental.save(target, data)
+    return {"included": len(included), "excluded": len(excluded), "removed": len(data["removed_artifacts"])}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run deterministic FM-Agent Skill executor actions without original FM-Agent.")
-    parser.add_argument("action", choices=("normalize-phases", "extract", "graph", "record-agent-edges", "preserve-specs", "restore-specs", "diff", "select")); parser.add_argument("--project", required=True); parser.add_argument("--submodule", action="append", default=[]); parser.add_argument("--codegraph-export"); parser.add_argument("--edges-file")
+    parser.add_argument("action", choices=("validate-baseline", "normalize-phases", "extract", "graph", "record-agent-edges", "preserve-specs", "restore-specs", "diff", "select")); parser.add_argument("--project", required=True); parser.add_argument("--submodule", action="append", default=[]); parser.add_argument("--codegraph-export"); parser.add_argument("--edges-file")
     args = parser.parse_args(); target = project(args)
     if args.action == "record-agent-edges" and not args.edges_file: parser.error("record-agent-edges requires --edges-file")
     exported = Path(args.codegraph_export) if args.codegraph_export else None
-    result = {"normalize-phases": lambda: normalize_phases(target), "extract": lambda: extract(target, args.submodule, exported), "graph": lambda: graph(target, exported), "record-agent-edges": lambda: record_agent_edges(target, Path(args.edges_file)), "preserve-specs": lambda: preserve_specs(target), "restore-specs": lambda: restore_specs(target), "diff": lambda: diff(target), "select": lambda: select(target)}[args.action]()
+    result = {"validate-baseline": lambda: validate_baseline(target), "normalize-phases": lambda: normalize_phases(target), "extract": lambda: extract(target, args.submodule, exported), "graph": lambda: graph(target, exported), "record-agent-edges": lambda: record_agent_edges(target, Path(args.edges_file)), "preserve-specs": lambda: preserve_specs(target), "restore-specs": lambda: restore_specs(target), "diff": lambda: diff(target), "select": lambda: select(target)}[args.action]()
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

@@ -16,7 +16,7 @@ import scheduler
 import semantic_executor
 
 
-SEMANTIC_TYPES = {"domain_context", "spec_batch", "verify_function", "verify_batch"}
+SEMANTIC_TYPES = set(semantic_executor.WORKERS)
 
 
 def earliest_incomplete(target: Path) -> str:
@@ -68,6 +68,8 @@ def claim(target: Path, job_id: str, host: str = "auto") -> dict:
         # atomically reserves only a bounded finalization slot.
         finalized = scheduler.claim_bug_validation_finalization(target, job_id)
         return bug_validation_executor.worker_request(target, finalized, "finalization", host)
+    if job.get("type") in SEMANTIC_TYPES and job.get("phase") == "verify_affected":
+        semantic_executor._active(target, job["phase"])
     if not any(item.get("id") == job_id for item in scheduler.admissible(target)["jobs"]):
         raise ValueError("job is not scheduler-admissible")
     started = scheduler.transition(target, job_id, "start", None, None, "execution")

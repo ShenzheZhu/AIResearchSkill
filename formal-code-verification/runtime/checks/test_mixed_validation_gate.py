@@ -31,7 +31,7 @@ class MixedValidationGateTest(unittest.TestCase):
             self.assertEqual(accepted["status"], "succeeded")
             summary = bug_summary.write_summary(target, "full")
             self.assertEqual(summary["total_inconclusive"], 1)
-            self.assertEqual(state.bug_validation_ready(target, {"calc.py::inc"}), (True, ""))
+            self.assertEqual(state.bug_validation_ready(target, {state.candidate_id("calc.py::inc")}), (True, ""))
             self.assertTrue(self.gate(target)["ok"])
 
     def test_final_status_still_requires_matching_dynamic_attempts(self):
@@ -53,7 +53,7 @@ class MixedValidationGateTest(unittest.TestCase):
                 summary[f"total_{recorded}"] = 0
                 summary[f"total_{claimed}"] = 1
                 state.atomic_json(state.fm_dir(target) / "bug_validation/summary.json", summary)
-                self.assertFalse(state.bug_validation_ready(target, {"calc.py::inc"})[0])
+                self.assertFalse(state.bug_validation_ready(target, {state.candidate_id("calc.py::inc")})[0])
                 self.assertFalse(self.gate(target)["ok"])
 
 

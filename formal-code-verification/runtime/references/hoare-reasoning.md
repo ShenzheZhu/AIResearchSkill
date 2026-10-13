@@ -27,7 +27,7 @@ API. It writes one structured postcondition/spec result. On invalid output the
 Coordinator requeues the same job under the configured retry bound (five total
 attempts by default); do not infer a verdict from prose. Emit a verification
 JSON object matching
-[artifact-contract.md](artifact-contract.md): `MATCH` for a proved check,
+[artifact-contract.md](artifact-contract.md): `MATCH` for a completed reasoned check,
 `MISMATCH` for a reasoned local violation, `DEPENDENCY_RISK` when only a
 callee's direct mismatch affects the caller's outcome, `INCONCLUSIVE` for an
 unavailable or genuinely unresolvable contract, and `ERROR` for failure to reason. Do not
@@ -38,3 +38,23 @@ malformed input solely by assuming validity, while an in-scope caller can pass
 unvalidated text or bytes. Re-open the specification using
 [specification-rules.md](specification-rules.md)'s input-domain rule, then
 check full-consumption and rejection paths as local behavior.
+
+For every parser-identified loop, state the invariant and examine initialization,
+preservation, normal exit, and relevant abrupt transfers. A direct mismatch may
+be a failed preservation or exit obligation: record the failure and its concrete
+witness, rather than inventing a successful proof or downgrading a grounded
+violation merely because Q is false. The verifier checks evidence shape against
+parsed loop identities; it does not machine-check these natural-language
+arguments. Missing parser support or an unresolved obligation remains a gap.
+
+Nested callable bodies belong to their own results. Python nested defaults,
+decorators and annotations are considered in the defining owner; a top-level
+callable's definition-time expressions belong to its enclosing definition flow,
+not its invocation body. Comprehension clauses are loops. Switch-local breaks
+are not loop exits, and unresolved exit targets such as goto remain explicit
+capability gaps.
+
+In `all_bugs` mode, continue after the first local mismatch and record each
+independent candidate with its own witness and exact source quote. Completion
+means all applicable paths were examined, not that every induction obligation
+succeeded. Each candidate then owns separate dynamic validation authority.

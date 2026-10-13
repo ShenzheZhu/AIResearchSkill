@@ -9,8 +9,27 @@ submodules to limit scope to project-relative directories. Extra edges must be
 validated JSON and domain knowledge must be readable Markdown.
 
 The fingerprint includes `one_phase`, submodules, extra-edge content hash, and
-each knowledge-file content hash. It exists to prevent an incremental run from
-reusing specifications built for a different scope or knowledge set.
+each knowledge-file content hash, and the `all_bugs` reasoning mode. It exists to prevent an incremental run from
+reusing specifications built for a different scope, knowledge set or reasoning
+mode. Captured `incremental_intent` belongs to the exact active run fingerprint;
+the completed baseline stores pure configuration compatibility separately from
+`run_fingerprint`, which identifies the actual accepted evidence. Do not rebind
+old receipts/probes to the new run.
+
+`all_bugs` defaults to `false`. `orchestrate.py --all-bugs` and
+`--no-all-bugs` are tri-state overrides: omit the flag to inherit configuration
+or the interrupted run's stored setting. `config.py set --all-bugs true|false`
+saves the default. Default mode admits one direct candidate per function;
+all-bugs mode continues complete reasoning for independent candidates, each
+with its own run-qualified validation job and probe evidence. Resume cannot
+change this mode.
+
+`--incremental INTENT.md` and `--note` capture the latest normative developer
+goal for one incremental run; they are not configuration defaults. New intent
+can run without changed source, and overrides older knowledge only for changed
+clauses. Module/file/function selection reviews possibly omitted work; actual
+native spec/info differences determine propagation and verification. Changed
+files invalidate all their functions conservatively, including unchanged bodies.
 
 `scheduler_executor` is fixed to `host-subagent`: semantic work uses the active
 Claude Code or Codex subagent facility. The enforced default profile is sixteen
@@ -21,7 +40,7 @@ through `max_active_subagents`, `spec_concurrency`, `verify_concurrency`,
 `read_only_plan_concurrency`. The first bounds live candidate probe work; the
 second bounds final report/receipt Workers after their immutable execution
 evidence has been accepted, so finalization cannot starve new candidates.
-`worker_target_tokens` (12000), `worker_max_functions` (20), and
+`worker_target_tokens` (12000), `worker_max_functions` (3), and
 `worker_max_source_bytes` (262144) drive deterministic adaptive spec/verify
 partitioning. `spec_batch_size` is a deprecated explicit compatibility cap.
 `worker_lease_seconds` defaults to 900. `bug_validation_max_attempts` defaults to
