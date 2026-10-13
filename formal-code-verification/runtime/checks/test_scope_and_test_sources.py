@@ -126,6 +126,20 @@ class ScopeAndTestSourcesTest(unittest.TestCase):
             for scope in (".git", "fm_agent", "fm_agent_skill", "fm_agent_plugin", ".codegraph"):
                 self.assertEqual(state.source_files(target, [scope]), [])
 
+    def test_vendor_dependency_skip_can_be_explicitly_selected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary).resolve()
+            for relative in ("dist/checkout.js", "dist/vendor/library.js", "vendor/api.py"):
+                source = target / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("def api(): return 1\n" if source.suffix == ".py" else "export function api() { return 1; }\n")
+            self.assertEqual(state.source_files(target), [])
+            self.assertEqual([path.relative_to(target).as_posix() for path in state.source_files(target, ["dist"])], ["dist/checkout.js"])
+            scopes = ["dist", "dist/vendor", "vendor"]
+            expected = ["dist/checkout.js", "dist/vendor/library.js", "vendor/api.py"]
+            self.assertEqual(sorted(path.relative_to(target).as_posix() for path in state.source_files(target, scopes)), expected)
+            self.assertEqual([item["path"] for item in state.source_manifest(target, scopes)["files"]], expected)
+
     def test_dispatch_reuses_normalized_config_after_snapshot_relocation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()

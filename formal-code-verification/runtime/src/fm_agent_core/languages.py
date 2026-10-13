@@ -1,4 +1,4 @@
-# Modified by AIResearchSkill: surface parser gaps and preserve named callable/TSX coverage.
+# Modified by AIResearchSkill: preserve named and unbound JS/TS callable coverage.
 """Single source of truth for FM-Agent Skill language capabilities.
 
 The Skill intentionally does not import FM-Agent.  This module mirrors only a
@@ -198,6 +198,8 @@ def _tree_sitter_spans(path: Path, profile: LanguageProfile) -> list[tuple[str, 
     if tree.root_node.has_error:
         raise SyntaxError(f"Tree-sitter could not parse {path}")
     node_types = {"function_definition", "function_declaration", "function_item", "method_definition", "method_declaration", "generator_function_declaration"}
+    javascript = profile.key in {"javascript", "typescript"}
+    javascript_callables = {"arrow_function", "function_expression", "generator_function"}
 
     def declaration_span(node):
         """Include `const`/`export` only when a declaration owns one function."""
@@ -242,16 +244,25 @@ def _tree_sitter_spans(path: Path, profile: LanguageProfile) -> list[tuple[str, 
             parent = node.parent
             while parent is not None and (parent.start_byte, parent.end_byte) not in covered:
                 parent = parent.parent
-            if parent is None:
-                raise ValueError(f"Unsupported unbound callable in {path}:{node.start_point[0] + 1}")
-            continue
+            if javascript and node.type in javascript_callables:
+                name_node = node.child_by_field_name("name")
+                if parent is not None and (name_node is None or (parent == node.parent and parent.type == "variable_declarator")):
+                    continue
+            else:
+                if parent is None:
+                    raise ValueError(f"Unsupported unbound callable in {path}:{node.start_point[0] + 1}")
+                continue
         else:
             continue
         if name_node is None:
-            raise ValueError(f"Unsupported callable declaration without a name in {path}:{node.start_point[0] + 1}")
-        name = source[name_node.start_byte:name_node.end_byte].decode("utf-8", "replace")
-        if not name.replace("$", "_").isidentifier():
-            raise ValueError(f"Unsupported callable name in {path}:{node.start_point[0] + 1}")
+            if not javascript or node.type not in javascript_callables | {"function_declaration", "generator_function_declaration"}:
+                raise ValueError(f"Unsupported callable declaration without a name in {path}:{node.start_point[0] + 1}")
+            # Tree-sitter positions distinguish callbacks even on the same line.
+            name = f"{node.type}@{node.start_point[0] + 1}:{node.start_point[1] + 1}"
+        else:
+            name = source[name_node.start_byte:name_node.end_byte].decode("utf-8", "replace")
+            if not name.replace("$", "_").isidentifier():
+                raise ValueError(f"Unsupported callable name in {path}:{node.start_point[0] + 1}")
         found.append((name, span.start_point[0] + 1, span.end_point[0] + 1))
         covered.add((node.start_byte, node.end_byte))
     return sorted(set(found), key=lambda item: (item[1], item[2], item[0]))

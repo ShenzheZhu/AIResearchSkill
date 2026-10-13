@@ -34,6 +34,9 @@ Keep their full definitions, tickets, allowed paths, and runtime gates unchanged
    batches; retain unprocessed or unsupported flows visibly. For a change scope,
    expand only to dependencies and consumers whose behavior the change affects,
    recording why each added path belongs. Default inventory exclusions are advisory: inspect served/deployed entrypaths and explicitly select real production directories such as `dist/` when required. Do not silently shrink the request.
+   Record excluded vendored dependency implementations separately from the
+   first-party batch. An explicit directory selection can override the default
+   `vendor/` exclusion when that directory contains the requested business code.
 2. **Discover obligations.** Trace relevant permissions, ownership and data
    invariants, failure/recovery behavior, duplicate requests, concurrent calls,
    process restart, and state shared across modules. Follow writes through their
