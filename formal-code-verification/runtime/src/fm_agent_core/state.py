@@ -1,3 +1,4 @@
+# Modified by AIResearchSkill: exclude standard colocated JavaScript and TypeScript tests.
 """Small, deterministic helpers for FM-Agent Skill state and artifacts.
 
 These helpers deliberately do not invoke ``main.py`` or an LLM.  They make the
@@ -195,7 +196,11 @@ def source_manifest_diff(project: Path, saved: dict, submodules: list[str] | Non
 def is_test_source_path(value: str) -> bool:
     parts = value.replace("\\", "/").lower().split("/")
     name = parts[-1]
-    return any(part in {"test", "tests", "testing", "fixtures"} for part in parts[:-1]) or name.startswith(("test_", "test-")) or "_test." in name or "_tests." in name
+    return (
+        any(part in {"test", "tests", "testing", "fixtures", "__tests__"} for part in parts[:-1])
+        or name.startswith(("test_", "test-")) or "_test." in name or "_tests." in name
+        or bool(re.search(r"\.(test|spec)\.(js|jsx|mjs|cjs|ts|tsx|mts|cts)$", name))
+    )
 
 
 def changed_source_paths(project: Path, base_commit: str, current_commit: str | None = None) -> set[str]:
