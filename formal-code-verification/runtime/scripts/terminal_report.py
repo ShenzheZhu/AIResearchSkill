@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by AIResearchSkill: retain published verification results using their accepted checkpoint identity.
 """The sole deterministic authority for terminal FM-Agent reporting."""
 from __future__ import annotations
 
@@ -51,7 +52,7 @@ def _verification_results(target: Path, snapshot_commit: str) -> list[dict]:
         if not isinstance(item, dict) or not isinstance(payload, dict):
             continue
         artifact = state.fm_dir(target) / "extracted_functions" / item["artifact"]
-        valid, _ = state.verification_result_ready(target, artifact, item.get("id"), payload)
+        valid, _ = state.verification_result_ready(target, artifact, item.get("id"), payload, snapshot_commit)
         if valid and payload.get("snapshot_commit") == snapshot_commit:
             results.append(payload)
     return results

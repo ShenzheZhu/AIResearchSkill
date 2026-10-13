@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Modified by AIResearchSkill: reject invalid static edges before accepting Worker success.
+# Modified by AIResearchSkill: validate static edges and Bug Validator function identity before accepting Worker success.
 """Durable current-job state for host FM-Agent workers; no run history."""
 from __future__ import annotations
 
@@ -456,6 +456,9 @@ def _validate(target, job, result=None):
             return "Verification Worker receipt verdict does not match its result"
     if job["type"] == "bug_validate" and not job.get("legacy_contract"):
         report = state.read_json(target / job["bug_result_path"], {})
+        function_id = job.get("input", {}).get("function_id")
+        if not isinstance(function_id, str) or not isinstance(report, dict) or report.get("function_id") != function_id:
+            return "Bug Validator report function identity does not match its assigned job"
         attempts = report.get("attempts") if isinstance(report, dict) else None
         index = int(job.get("negative_attempt_index", 1))
         if not isinstance(attempts, list) or len(attempts) < index: return "Bug Validator result must append the current probe to attempts"

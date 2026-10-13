@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by AIResearchSkill: reuse the shared production/test path predicate.
 """Host-neutral deterministic FM-Agent Skill executor.
 
 This module deliberately never imports or invokes the original FM-Agent. The
@@ -21,18 +22,11 @@ def _safe(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-") or "function"
 
 
-def _is_test_source(rel: str) -> bool:
-    parts = Path(rel).as_posix().lower().split("/")
-    name = parts[-1]
-    return any(part in {"test", "tests", "testing", "fixtures"} for part in parts[:-1]) or name.startswith(("test_", "test-")) or "_test." in name or "_tests." in name
-
-
 def _sources(target: Path, submodules: list[str]) -> list[Path]:
     result = []
     for source in state.source_files(target):
         rel = source.relative_to(target).as_posix()
         if submodules and not any(rel == item.rstrip("/") or rel.startswith(item.rstrip("/") + "/") for item in submodules): continue
-        if _is_test_source(rel): continue
         result.append(source)
     return result
 
@@ -83,7 +77,7 @@ def normalize_phases(target: Path) -> dict:
                 candidate = (target / source).resolve()
                 if target not in candidate.parents or not candidate.is_file(): raise ValueError(f"phase {number} references missing source: {source}")
                 rel = candidate.relative_to(target).as_posix()
-                if not _is_test_source(rel):
+                if not state.is_test_source_path(rel):
                     sources.append(rel)
             if sources: clean_modules.append({"name": str(module.get("name", f"phase-{number}")), "description": str(module.get("description", "")), "source_files": sorted(set(sources))})
         dependencies = phase.get("depends_on_phases", phase.get("depends_on", phase.get("dependencies", [])))

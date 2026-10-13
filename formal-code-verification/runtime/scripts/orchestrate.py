@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by AIResearchSkill: normalize accepted directory scopes before snapshot relocation.
 """Preflight, Git-snapshot mode selection, and active-analysis preparation."""
 from __future__ import annotations
 
@@ -53,11 +54,14 @@ def inspection_config(args, target):
     return build_config(args, target, base)
 
 
-def inspect(target, args):
+def inspect(target, args, config=None):
     preflight = state.preflight(target)
     if not preflight["ok"]: return {"ok": False, "preflight": preflight}
-    config = inspection_config(args, target); issues = valid_settings(target, config)
+    config = inspection_config(args, target) if config is None else dict(config)
+    issues = valid_settings(target, config)
     if issues: return {"ok": False, "issues": issues}
+    scopes = [(target / item).resolve().relative_to(target).as_posix() for item in config["submodules"]]
+    config["submodules"] = [] if "." in scopes else sorted(set(scopes))
     fingerprint, _ = state.fingerprint(target, config["one_phase"], config["submodules"], config.get("extra_edge"), config["knowledge"], config)
     baseline = state.inspect_baseline(target, fingerprint, config["submodules"])
     mode = "noop" if baseline["valid"] and baseline.get("manifest_compatible") else "incremental" if baseline["valid"] else "full"
@@ -344,7 +348,7 @@ def main():
         print(json.dumps({"ok": True, "mode": "noop", "project": str(source_target), "baseline": preview["baseline"], "config": preview["config"], "analysis": record}, ensure_ascii=False, indent=2)); return
     try:
         snapshot = create_snapshot(source_target); target = Path(snapshot["snapshot"]).resolve()
-        selected = inspect(target, args)
+        selected = inspect(target, args, preview["config"])
         if not selected["ok"]: raise RuntimeError(str(selected))
         lock = acquire(target, args.force_stale_lock)
         record = call_pipeline(target, "prepare", selected["mode"], selected["config"])
