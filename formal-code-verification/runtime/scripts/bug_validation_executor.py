@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by AIResearchSkill: issue complete bounded Worker tickets and validate durable command evidence.
 """Deterministic Bug Validator state machine for a Codex/Claude Coordinator.
 
 This script never starts an LLM, imports FM-Agent, or executes an Agent-provided
@@ -17,10 +18,11 @@ from pathlib import Path
 
 from _common import project, state
 from fm_agent_core import worker_contracts
+from fm_agent_core.languages import execution_ecosystems, profile_for_key
 import scheduler
 from bug_summary import write_summary
 from probe_runner import configured_adapter, run_probe
-from reproduction_runner import attempt_dir, read_contract, run as run_reproduction
+from reproduction_runner import attempt_dir, output_classification, read_contract, run as run_reproduction
 
 
 EXECUTION_MODES = {"agent-executed", "adapter"}
@@ -56,40 +58,122 @@ def worker_request(target: Path, job: dict, pass_name: str, host: str = "auto") 
     attempt = int(job.get("attempts", 0))
     if attempt < 1:
         raise ValueError("running Bug Validator job has no attempt")
+    function_id = job.get("input", {}).get("function_id")
+    if not isinstance(function_id, str) or not function_id:
+        raise ValueError("Bug Validator ticket requires its assigned function identity")
     root = attempt_dir(target, bug_id, attempt).relative_to(target).as_posix()
-    return {
+    manifest = f"fm_agent_skill/jobs/{job['id']}.json"
+    reads = {manifest}
+    execution = execution_mode(target)
+    index = state.source_index(target) or {}
+    item = next((entry for entry in index.get("functions", []) if isinstance(entry, dict) and entry.get("id") == function_id), None)
+    if pass_name == "preparation":
+        if not isinstance(item, dict) or not all(isinstance(item.get(key), str) for key in ("path", "artifact", "language")):
+            raise ValueError("Bug Validator preparation requires its current source-index entry")
+        from semantic_executor import _related_artifacts
+        assigned = {item["artifact"]} | _related_artifacts(target, [item["artifact"]])
+        for entry in index["functions"]:
+            if not isinstance(entry, dict) or entry.get("artifact") not in assigned:
+                continue
+            artifact = f"fm_agent/extracted_functions/{entry['artifact']}"
+            reads.update({entry["path"], artifact, artifact + ".spec.json", artifact + ".info.json"})
+        verification = f"fm_agent/logic_verification_results/{Path(item['artifact']).with_suffix('.json').as_posix()}"
+        reads.update({verification, "fm_agent_skill/control/analysis_index.json", "fm_agent_skill/control/graph_edges.json"})
+        if not all((target / path).is_file() for path in (item["path"], f"fm_agent/extracted_functions/{item['artifact']}", verification)):
+            raise ValueError("Bug Validator preparation is missing assigned source or verification evidence")
+        language = item["language"]
+        public_entrypoint = None
+    else:
+        _, approved = read_contract(target, bug_id, attempt, execution)
+        language, public_entrypoint = approved["language"], approved["public_entrypoint"]
+        reads.update({f"{root}/reproduction.json", f"{root}/{approved['probe_file']}"})
+        if pass_name == "execution":
+            public_path = target / public_entrypoint["target"]
+            source_root = public_path.parent if public_path.is_file() else public_path
+            reads.update(path.relative_to(target).as_posix() for path in state.source_files(target, [source_root.relative_to(target).as_posix()]))
+        elif pass_name == "finalization":
+            result_path = f"{root}/reproduction_result.json"
+            if not (target / result_path).is_file():
+                raise ValueError("Bug Validator finalization requires its recorded execution result")
+            reads.update({result_path, job["bug_result_path"]})
+        else:
+            raise ValueError(f"unsupported Bug Validator Worker pass: {pass_name}")
+    profile = profile_for_key(language)
+    if profile is None or profile.probe_extension is None:
+        raise ValueError(f"Bug Validator ticket has unsupported language: {language}")
+    if pass_name != "finalization":
+        metadata_roots = {target, (target / item["path"]).parent} if pass_name == "preparation" else {target, source_root}
+        if pass_name == "preparation":
+            for directory in tuple(metadata_roots):
+                reads.update((directory / name).relative_to(target).as_posix() for name in ("README", "README.md", "README.rst", "README.txt"))
+            for initializer in state.source_files(target):
+                if initializer.name == "__init__.py":
+                    reads.add(initializer.relative_to(target).as_posix())
+                    metadata_roots.update(parent for parent in initializer.parents if parent == target or target in parent.parents)
+        for directory in metadata_roots:
+            reads.update((directory / name).relative_to(target).as_posix() for name in (*profile.build_detectors, "Makefile", "makefile", "GNUmakefile"))
+    outputs = {
+        "preparation": [f"{root}/reproduction.json", f"{root}/probe{profile.probe_extension}"],
+        "execution": [f"{root}/reproduction_result.json"],
+        "finalization": list(job["required_outputs"]),
+    }[pass_name]
+    writes = list(outputs)
+    if pass_name == "execution":
+        writes.append(f"{root}/workspace/")
+    elif pass_name == "finalization":
+        detail = job["bug_result_path"].removesuffix(".result.json") + ".md"
+        if detail not in writes:
+            writes.append(detail)
+    invocation = worker_contracts.invocation("fm-agent-skill:fm-bug-validate-worker", host)
+    ticket = {
+        "schema_version": 2,
         "action": "host_worker",
         "worker": "fm-agent-skill:fm-bug-validate-worker",
-        "host_invocation": worker_contracts.invocation("fm-agent-skill:fm-bug-validate-worker", host),
+        "worker_definition": invocation["worker_definition"],
+        "worker_definition_sha256": invocation["worker_definition_sha256"],
+        "host_invocation": invocation,
+        "project": str(target.resolve()),
+        "job_manifest": manifest,
+        "input_hash": job.get("input_hash"),
+        "validation_message": job.get("message"),
+        "phase": job["phase"],
+        "function_id": function_id,
+        "snapshot_commit": state.current_snapshot_commit(target),
+        "language": language,
+        "execution_mode": execution,
+        "execution_ecosystems": list(execution_ecosystems(profile, execution)),
+        "public_entrypoint": public_entrypoint,
         "pass": pass_name,
         "job_id": job["id"],
         "mode": mode,
         "bug_id": bug_id,
         "attempt": attempt,
         "attempt_dir": root,
-        "required_outputs": {
-            "preparation": [f"{root}/reproduction.json", f"{root}/probe.<language-extension>"],
-            "execution": [f"{root}/reproduction_result.json"],
-            "finalization": [job["bug_result_path"]],
-        }[pass_name],
+        "read_paths": sorted(path for path in reads if (target / path).is_file()),
+        "write_paths": writes,
+        "required_outputs": outputs,
         "rule": (
             "Invoke this only through the active Codex/Claude host worker mechanism; do not run FM-Agent."
             if pass_name != "execution" else
             "Invoke this through the active host worker mechanism. The Worker may run project-scoped reproduction commands and must persist their exact evidence."
         ),
     }
+    path = state.control_dir(target) / "dispatches" / f"{job['id']}-attempt-{attempt:03d}-{pass_name}.json"
+    state.atomic_json(path, ticket)
+    return {"ticket_path": path.relative_to(target).as_posix(), **ticket}
 
 
-def agent_execution_result_valid(target: Path, job: dict) -> bool:
+def agent_execution_result_valid(target: Path, job: dict, *, snapshot_commit: str | None = None) -> bool:
     """Validate identity and outcome before a fast-mode Worker may finalize."""
     bug_id, _ = context(job); attempt = int(job["attempts"])
-    _, contract = read_contract(target, bug_id, attempt, "agent-executed")
+    snapshot_commit = snapshot_commit or state.current_snapshot_commit(target)
+    _, contract = read_contract(target, bug_id, attempt, "agent-executed", snapshot_commit=snapshot_commit)
     result = state.read_json(attempt_dir(target, bug_id, attempt) / "reproduction_result.json", None)
     if not isinstance(result, dict):
         return False
     if any(result.get(key) != value for key, value in {
         "schema_version": 1, "execution_mode": "agent-executed", "bug_id": bug_id,
-        "attempt": attempt, "snapshot_commit": state.current_snapshot_commit(target),
+        "attempt": attempt, "snapshot_commit": snapshot_commit,
         "language": contract["language"], "public_entrypoint": contract["public_entrypoint"],
     }.items()):
         return False
@@ -108,7 +192,40 @@ def agent_execution_result_valid(target: Path, job: dict) -> bool:
         result["state"] != "unsupported" or classification != "inconclusive"
     ):
         return False
-    return agent_execution_commands_valid(target, attempt_dir(target, bug_id, attempt), result) and isinstance(result.get("reason"), str)
+    if not agent_execution_commands_valid(target, attempt_dir(target, bug_id, attempt), result) or not isinstance(result.get("reason"), str):
+        return False
+    commands = result["commands"]
+    observed, _ = output_classification(
+        "\n".join(item["stdout"] for item in commands),
+        next((item["returncode"] for item in commands if item["returncode"] != 0), 0),
+    )
+    if result["state"] == "unsupported":
+        return observed in {"inconclusive", "runtime_error"}
+    return classification == observed
+
+
+def execution_result_valid(target: Path, job: dict, *, snapshot_commit: str | None = None) -> bool:
+    """Recheck recorded execution using its original snapshot and outcome rules."""
+    bug_id, _ = context(job); attempt = int(job["attempts"])
+    result = state.read_json(attempt_dir(target, bug_id, attempt) / "reproduction_result.json", {})
+    if not isinstance(result, dict):
+        return False
+    if result.get("execution_mode") == "agent-executed":
+        return agent_execution_result_valid(target, job, snapshot_commit=snapshot_commit)
+    snapshot_commit = snapshot_commit or state.current_snapshot_commit(target)
+    _, contract = read_contract(target, bug_id, attempt, "adapter", snapshot_commit=snapshot_commit)
+    if any(result.get(key) != value for key, value in {
+        "schema_version": 1, "bug_id": bug_id, "attempt": attempt,
+        "snapshot_commit": snapshot_commit, "language": contract["language"],
+        "public_entrypoint": contract["public_entrypoint"],
+    }.items()) or not isinstance(result.get("reason"), str):
+        return False
+    if result.get("state") == "unsupported":
+        return result.get("classification") == "inconclusive" and result.get("returncode") is None and not result.get("stdout")
+    if not isinstance(result.get("stdout"), str) or not isinstance(result.get("returncode"), int):
+        return False
+    observed, _ = output_classification(result["stdout"], result["returncode"])
+    return result.get("classification") == observed and result.get("state") == ("execution_error" if observed == "runtime_error" else "completed")
 
 
 def agent_execution_commands_valid(target: Path, root: Path, result: dict) -> bool:
@@ -265,10 +382,13 @@ def submit_agent_execution(target: Path, job_id: str) -> dict:
 
 
 def all_phase_jobs_succeeded(target: Path, phase: str) -> bool:
-    root = state.skill_dir(target) / "jobs"
-    jobs = [state.read_json(path, {}) for path in root.glob("*.json")] if root.is_dir() else []
-    relevant = [job for job in jobs if isinstance(job, dict) and job.get("phase") == phase and job.get("type") == "bug_validate"]
-    return bool(relevant) and all(job.get("status") == "succeeded" for job in relevant)
+    relevant = [job for job in scheduler.current_jobs_for_phase(target, phase) if job.get("type") == "bug_validate"]
+    if not relevant or any(job.get("status") != "succeeded" for job in relevant):
+        return False
+    record = state.active_record(target)
+    for job in relevant:
+        scheduler.accepted_job(target, job["id"], snapshot_commit=state.current_snapshot_commit(target), input_fingerprint=record.get("fingerprint", ""))
+    return True
 
 
 def canonical_finalization_receipt(target: Path, job: dict) -> dict:

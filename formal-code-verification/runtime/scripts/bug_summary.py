@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by AIResearchSkill: require verified durable receipts before counting Bug Validator outcomes.
 """Write the current Bug Validator summary from completed result reports."""
 from __future__ import annotations
 
@@ -30,6 +31,8 @@ def write_summary(target, mode: str) -> dict:
     # direct MISMATCH candidates.  It is a completed automatic phase, not an
     # unrequested validation pass.
     if not jobs:
+        if candidates:
+            raise ValueError("Bug Validator candidates have no accepted scheduler jobs")
         root = state.fm_dir(target) / "bug_validation"
         summary = {
             "schema_version": 1,
@@ -45,30 +48,15 @@ def write_summary(target, mode: str) -> dict:
         }
         state.atomic_json(root / "summary.json", summary)
         return summary
-    # Current planners always put function_id in the job input.  Older
-    # coordinator-created jobs used only bug_id and required_outputs; resolve
-    # those jobs only when their one result path identifies exactly one report.
-    # This keeps the candidate/job equality gate strict while allowing a
-    # resumable pre-SQLite run to finish safely.
-    reports_root = state.fm_dir(target) / "bug_validation"
-    report_by_path = {}
-    for path in reports_root.glob("*.result.json") if reports_root.is_dir() else []:
-        report = state.read_json(path, None)
-        if isinstance(report, dict) and isinstance(report.get("function_id"), str):
-            report_by_path[path.relative_to(target).as_posix()] = report["function_id"]
     job_functions = {}
     for job in jobs:
         input_data = job.get("input") if isinstance(job.get("input"), dict) else {}
         function_id = input_data.get("function_id")
         if not isinstance(function_id, str):
-            paths = [value for value in job.get("required_outputs", []) if isinstance(value, str)]
-            matches = {report_by_path[path] for path in paths if path in report_by_path}
-            if len(matches) == 1:
-                function_id = next(iter(matches))
-        if isinstance(function_id, str):
-            if function_id in job_functions:
-                raise ValueError(f"Bug Validator has duplicate jobs for {function_id}")
-            job_functions[function_id] = job
+            raise ValueError("Bug Validator job is missing its assigned function identity")
+        if function_id in job_functions:
+            raise ValueError(f"Bug Validator has duplicate jobs for {function_id}")
+        job_functions[function_id] = job
     if set(job_functions) != candidates:
         raise ValueError("Bug Validator jobs do not match current direct MISMATCH candidates")
     unfinished = [
@@ -80,6 +68,12 @@ def write_summary(target, mode: str) -> dict:
             "Bug Validator summary requires scheduler-successful jobs; unfinished: "
             + ", ".join(sorted(unfinished))
         )
+    record = state.active_record(target)
+    for job in job_functions.values():
+        scheduler.accepted_job(
+            target, job["id"], snapshot_commit=state.current_snapshot_commit(target),
+            input_fingerprint=record.get("fingerprint", ""),
+        )
     root = state.fm_dir(target) / "bug_validation"
     reports = {}
     for path in root.glob("*.result.json") if root.is_dir() else []:
@@ -90,19 +84,6 @@ def write_summary(target, mode: str) -> dict:
         reports[function_id] = report
     if set(reports) != candidates:
         raise ValueError("bug reports do not match current direct MISMATCH candidates")
-    for function_id, job in job_functions.items():
-        expected = job.get("bug_result_path")
-        if not isinstance(expected, str):
-            outputs = [value for value in job.get("required_outputs", []) if isinstance(value, str)]
-            expected = outputs[0] if len(outputs) == 1 else None
-        if not isinstance(expected, str) or not (target / expected).is_file():
-            raise ValueError(f"Bug Validator result path is missing for {function_id}")
-        # The exact path check avoids accepting a same-function report written
-        # by an unleased or stale attempt.
-        report_path = target / expected
-        report = state.read_json(report_path, {})
-        if report.get("function_id") != function_id:
-            raise ValueError(f"Bug Validator result does not belong to {function_id}")
     counts = {"confirmed": 0, "rejected": 0, "inconclusive": 0}
     for function_id, report in reports.items():
         status = report.get("confirmation_status")

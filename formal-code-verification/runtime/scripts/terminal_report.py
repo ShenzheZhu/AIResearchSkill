@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Modified by AIResearchSkill: retain published verification results using their accepted checkpoint identity.
+# Modified by AIResearchSkill: preserve snapshot identity, require accepted evidence and expose reasoning/business gaps.
 """The sole deterministic authority for terminal FM-Agent reporting."""
 from __future__ import annotations
 
@@ -59,30 +59,23 @@ def _verification_results(target: Path, snapshot_commit: str) -> list[dict]:
 
 
 def _bug_results(target: Path, snapshot_commit: str, candidates: set[str]) -> list[dict]:
-    root = state.fm_dir(target) / "bug_validation"
-    try:
-        import scheduler
-        jobs = {
-            job.get("bug_result_path"): job
-            for job in scheduler.jobs_for_phase(target, "bug_validation")
-            if job.get("type") == "bug_validate" and not job.get("legacy_contract")
-        }
-    except (OSError, RuntimeError, ValueError):
-        jobs = {}
+    import scheduler
+    fingerprint = state.active_record(target).get("fingerprint", "")
+    plan = state.read_json(state.control_dir(target) / "job_plans" / "bug_validation.json", {})
+    entries = plan.get("entries") if isinstance(plan, dict) else None
     results = []
-    for path in sorted(root.glob("*.result.json")) if root.is_dir() else []:
-        relative = path.relative_to(target).as_posix()
-        job = jobs.get(relative)
-        # A file is not an accepted Bug Validator result until the durable
-        # scheduler accepted its receipt for this job.
-        if jobs and (not isinstance(job, dict) or job.get("status") != "succeeded"):
-            continue
-        payload = state.read_json(path, None)
-        if not isinstance(payload, dict) or payload.get("snapshot_commit") != snapshot_commit:
-            continue
-        function_id = payload.get("function_id") or payload.get("bug_id")
-        if function_id not in candidates:
-            continue
+    for function_id in sorted(candidates):
+        # Use the persisted plan's identity, never accept an unregistered file.
+        if not isinstance(entries, list):
+            raise ValueError(f"accepted Bug Validation evidence unavailable for {function_id}: missing job plan")
+        entry = next((item for item in entries if isinstance(item, dict) and item.get("function_id") == function_id), None)
+        if not isinstance(entry, dict) or not isinstance(entry.get("job_id"), str):
+            raise ValueError(f"accepted Bug Validation evidence unavailable for {function_id}: missing job plan")
+        job = scheduler.accepted_job(target, entry["job_id"], snapshot_commit=snapshot_commit, input_fingerprint=fingerprint)
+        if job.get("input", {}).get("function_id") != function_id:
+            raise ValueError(f"accepted Bug Validation identity does not match {function_id}")
+        relative = job["bug_result_path"]
+        payload = state.read_json(target / relative, None)
         status = payload.get("confirmation_status")
         attempts = payload.get("attempts")
         if status not in state.BUG_FINAL_STATUSES or not isinstance(attempts, list) or not attempts:
@@ -115,7 +108,7 @@ def _bug_results(target: Path, snapshot_commit: str, candidates: set[str]) -> li
             "function_id": function_id,
             "status": status,
             "attempt_count": len(dynamic),
-            "result_path": path.relative_to(target).as_posix(),
+            "result_path": relative,
             "evidence_reason": evidence_reason,
             "interpretation": interpretation,
         })
@@ -123,13 +116,59 @@ def _bug_results(target: Path, snapshot_commit: str, candidates: set[str]) -> li
 
 
 def _scheduler_aggregate(target: Path) -> dict:
+    import scheduler
     try:
-        import scheduler
-        return scheduler.aggregate(target)
-    except (AttributeError, OSError, ValueError, RuntimeError):
-        receipts = state.control_dir(target) / "phase_receipts"
-        values = [state.read_json(path, {}) for path in sorted(receipts.glob("*.json"))] if receipts.is_dir() else []
-        return {"legacy_phase_receipts": [value for value in values if isinstance(value, dict)]}
+        result = scheduler.aggregate_readonly(target)
+        if not result.get("groups") or not result.get("converged"):
+            return {**result, "status": "unavailable", "reason": "current scheduler run is empty or has unfinished/failed jobs"}
+        return result
+    except (OSError, ValueError, RuntimeError, scheduler.sqlite3.Error) as exc:
+        return {"status": "unavailable", "converged": False, "reason": str(exc)}
+
+
+def _business_coverage(target: Path, snapshot_commit: str) -> dict:
+    path = state.control_dir(target) / "business_coverage.json"
+    value = state.read_json(path, None)
+    missing = {"status": "missing", "path": path.relative_to(target).as_posix(), "counts": {}, "rows": [], "reason": "business coverage ledger was not recorded"}
+    if value is None:
+        return missing
+    if not isinstance(value, dict) or value.get("schema_version") != 1 or value.get("snapshot_commit") != snapshot_commit or not isinstance(value.get("rows"), list) or not value["rows"]:
+        return {**missing, "status": "invalid", "reason": "coverage ledger is empty, invalid or belongs to another snapshot"}
+    counts = {"passed": 0, "failed": 0, "unknown": 0}
+    seen = set()
+    for row in value["rows"]:
+        if not isinstance(row, dict) or any(not isinstance(row.get(key), str) or not row[key].strip() for key in ("id", "flow", "requirement", "limitation")) or row.get("status") not in counts or row["id"] in seen:
+            return {**missing, "status": "invalid", "reason": "coverage rows need distinct identities, requirements, statuses and explicit limits"}
+        evidence = row.get("evidence", [])
+        if not isinstance(evidence, list):
+            return {**missing, "status": "invalid", "reason": "coverage evidence must be a list"}
+        levels, outcomes = set(), set()
+        for item in evidence:
+            if not isinstance(item, dict) or item.get("level") not in {"reasoning", "actual-code", "integration", "machine-verifier"}:
+                return {**missing, "status": "invalid", "reason": "coverage evidence has an invalid level"}
+            evidence_path = state._project_relative(target, item.get("path"))
+            if evidence_path is None or not evidence_path.is_file():
+                return {**missing, "status": "invalid", "reason": "coverage evidence file is unavailable"}
+            levels.add(item["level"])
+            if row["status"] != "unknown" and item["level"] != "reasoning":
+                import bug_validation_executor
+                result = state.read_json(evidence_path, {})
+                try:
+                    bug_id, attempt = result["bug_id"], result["attempt"]
+                    expected = bug_validation_executor.attempt_dir(target, bug_id, attempt) / "reproduction_result.json"
+                    job = {"attempts": attempt, "input": {"bug_id": bug_id, "mode": "full"}}
+                    if evidence_path != expected or result.get("state") != "completed" or not bug_validation_executor.execution_result_valid(target, job, snapshot_commit=snapshot_commit):
+                        raise ValueError("execution is unavailable or invalid")
+                    outcomes.add(result["classification"])
+                except (KeyError, TypeError, ValueError, OSError):
+                    return {**missing, "status": "invalid", "reason": "passed/failed coverage requires completed, validated execution evidence"}
+        if row["status"] != "unknown" and not levels.intersection({"actual-code", "integration", "machine-verifier"}):
+            return {**missing, "status": "invalid", "reason": "passed/failed business rows require execution evidence, not reasoning alone"}
+        if (row["status"] == "passed" and ("not_reproduced" not in outcomes or "confirmed" in outcomes)) or (row["status"] == "failed" and "confirmed" not in outcomes):
+            return {**missing, "status": "invalid", "reason": "coverage status contradicts the recorded execution outcome"}
+        seen.add(row["id"])
+        counts[row["status"]] += 1
+    return {"status": "available", "path": path.relative_to(target).as_posix(), "counts": counts, "rows": value["rows"], "reason": None}
 
 
 def official_result_available(target: Path) -> tuple[bool, str | None]:
@@ -146,11 +185,18 @@ def build(target: Path) -> dict:
     manifests = _phase_manifests(target)
     scheduler = _scheduler_aggregate(target)
     verification = _verification_results(target, checked["snapshot_commit"])
+    reasoning_counts = {verdict: sum(item.get("verdict") == verdict for item in verification) for verdict in sorted(state.VERDICTS)}
+    reasoning_gaps = [{"function_id": item["function_id"], "verdict": item["verdict"], "details": item.get("gaps") or item.get("error") or item.get("reasoning")} for item in verification if item.get("verdict") in {"INCONCLUSIVE", "DEPENDENCY_RISK", "ERROR"}]
+    coverage = _business_coverage(target, checked["snapshot_commit"])
     mismatches = {
         result["function_id"] for result in verification
         if result.get("verdict") == "MISMATCH" and isinstance(result.get("function_id"), str)
     }
-    bug_results = _bug_results(target, checked["snapshot_commit"], mismatches)
+    acceptance_error = None
+    try:
+        bug_results = _bug_results(target, checked["snapshot_commit"], mismatches)
+    except (OSError, ValueError, RuntimeError) as exc:
+        bug_results, acceptance_error = [], str(exc)
     confirmed = [item for item in bug_results if item["status"] == "confirmed"]
     rejected = [item for item in bug_results if item["status"] == "rejected"]
     inconclusive = [item for item in bug_results if item["status"] == "inconclusive"]
@@ -165,6 +211,9 @@ def build(target: Path) -> dict:
         for fid in sorted(static_finding_ids)
     ]
     official, reason = official_result_available(target)
+    authority_unavailable = bool(acceptance_error or scheduler.get("status") == "unavailable")
+    if authority_unavailable:
+        official, reason = False, acceptance_error or scheduler["reason"]
     # Never report partial dynamic evidence as confirmed bugs. It remains in
     # the durable attempt artifacts for a later accepted completion.
     report_confirmed = confirmed if official else []
@@ -174,7 +223,8 @@ def build(target: Path) -> dict:
     report = {
         "schema_version": 1,
         "official_result_available": official,
-        "status": "official" if official else "incomplete",
+        "status": "unavailable" if authority_unavailable else "official" if official else "incomplete",
+        "audit_status": "incomplete" if not official or coverage["status"] != "available" else "completed_with_gaps" if reasoning_gaps or coverage["counts"]["unknown"] else "completed",
         "reason": reason,
         "snapshot_commit": checked["snapshot_commit"],
         "analysis_fingerprint": state.active_record(target).get("fingerprint"),
@@ -189,11 +239,13 @@ def build(target: Path) -> dict:
         "counts": {
             "verification_results": len(verification),
             "candidates": len(mismatches),
-            "static_findings": len(report_static),
-            "confirmed": len(report_confirmed),
-            "rejected": len(report_rejected),
-            "inconclusive": len(report_inconclusive),
+            "static_findings": len(report_static) if not authority_unavailable else None,
+            "confirmed": len(report_confirmed) if not authority_unavailable else None,
+            "rejected": len(report_rejected) if not authority_unavailable else None,
+            "dynamic_inconclusive": len(report_inconclusive) if not authority_unavailable else None,
         },
+        "reasoning": {"counts": reasoning_counts, "gaps": reasoning_gaps},
+        "business_coverage": coverage,
         "authority_rules": {
             "candidate_requires_schema_valid_mismatch": True,
             "confirmed_requires_dynamic_evidence": True,
@@ -222,11 +274,13 @@ def main() -> None:
     args = parser.parse_args(); target = project(args)
     try:
         result, code = build(target), 0
+        if result.get("audit_status") == "incomplete":
+            code = 2
     except (checkpoint.CheckpointError, OSError, ValueError, RuntimeError) as exc:
         result, code = {
             "schema_version": 1, "official_result_available": False,
             "status": "unavailable", "reason": str(exc),
-            "counts": {"verification_results": 0, "candidates": 0, "confirmed": 0, "rejected": 0, "inconclusive": 0},
+            "audit_status": "incomplete", "counts": None,
         }, 2
     # Persist the exact structured report so later resume and diagnose actions
     # can distinguish an intentional phase failure from an unverified chat summary.
@@ -236,7 +290,7 @@ def main() -> None:
         result = {
             "schema_version": 1, "official_result_available": False,
             "status": "unavailable", "reason": f"could not persist terminal report: {exc}",
-            "counts": {"verification_results": 0, "candidates": 0, "confirmed": 0, "rejected": 0, "inconclusive": 0},
+            "audit_status": "incomplete", "counts": None,
         }
         code = 2
     print(json.dumps(result, ensure_ascii=False, indent=2))

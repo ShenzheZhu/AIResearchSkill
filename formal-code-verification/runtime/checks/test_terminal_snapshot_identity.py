@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by AIResearchSkill: verify saved snapshot identity with genuinely accepted Bug Validation receipts.
 """Published reports use the sealed snapshot rather than the live source HEAD."""
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
 from fm_agent_core import state
 import checkpoint
 import terminal_report
+from test_accepted_bug_evidence import write_accepted_candidate
 
 
 class TerminalSnapshotIdentityTest(unittest.TestCase):
@@ -39,6 +41,8 @@ class TerminalSnapshotIdentityTest(unittest.TestCase):
             }
             result_path = state.fm_dir(target) / "logic_verification_results/calc-inc-1.json"
             state.atomic_json(result_path, result)
+            with patch.object(state, "current_snapshot_commit", return_value="saved-snapshot"):
+                write_accepted_candidate(target)
             state.atomic_json(checkpoint.root(target) / "official_result.json", {"official_result_available": True})
             with patch.object(state, "current_snapshot_commit", return_value="new-live-head"), \
                  patch.object(checkpoint, "validate", return_value={"snapshot_commit": "saved-snapshot", "checkpoint_id": "sealed"}):
@@ -46,6 +50,7 @@ class TerminalSnapshotIdentityTest(unittest.TestCase):
                 self.assertTrue(report["official_result_available"])
                 self.assertEqual(report["counts"]["verification_results"], 1)
                 self.assertEqual(report["counts"]["candidates"], 1)
+                self.assertEqual(report["counts"]["confirmed"], 1)
                 self.assertEqual(report["findings"]["candidates"], ["calc.py::inc"])
 
                 result["snapshot_commit"] = "new-live-head"

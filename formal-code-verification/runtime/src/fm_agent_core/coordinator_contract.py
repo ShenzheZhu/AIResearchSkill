@@ -1,3 +1,4 @@
+# Modified by AIResearchSkill: keep semantic work in fresh native Worker contexts.
 """Host-native Coordinator contract shared by Codex and Claude runs."""
 from __future__ import annotations
 
@@ -30,9 +31,9 @@ def invocation(host: str = "auto") -> dict:
             "subagent mechanism, submit every receipt, then request the next "
             "Coordinator action immediately. Do not return a terminal analysis "
             "message while the scheduler has queued, running, or retryable jobs. "
-            "If the host has no subagent capability, execute exactly one returned "
-            "ticket yourself as a serial parent-worker fallback, submit its receipt, "
-            "then resume coordinating. Workers cannot coordinate, spawn workers, "
+            "If the host has no fresh subagent capability, stop with "
+            "blocked_requires_fresh_context; never execute semantic Worker work "
+            "in the parent conversation. Workers cannot coordinate, spawn workers, "
             "or advance phases."
         ),
     }
@@ -40,19 +41,24 @@ def invocation(host: str = "auto") -> dict:
         contract.update({
             "native_launch_tool": "collaboration.spawn_agent",
             "native_launch_fallback_tool": "spawn_agent",
+            "native_launch_arguments": {"fork_turns": "none"},
+            "fallback": "blocked_requires_fresh_context",
             "launch_mode": "parallel_returned_tickets",
             "developer_instruction": (
                 "Act as the sole FM-Agent Coordinator in the current Codex Agent. For every "
                 "returned ticket, first call collaboration.spawn_agent when it is in the current "
                 "tool list (or spawn_agent when exposed without a namespace), using a unique "
-                "task_name derived from job_id and a message that names the ticket and immutable "
-                "worker definition. Launch all returned tickets up to the supplied limit in parallel. "
+                "task_name derived from job_id and native_launch_arguments (fork_turns='none'). "
+                "Do not inherit the parent conversation. The message may contain only the returned "
+                "ticket, immutable worker definition, and evidence permitted by the ticket. "
+                "Launch all returned tickets up to the supplied limit in parallel. "
                 "Do not conclude native subagents are unavailable merely because this plugin has "
                 "no named-agent registry. Submit every receipt, then request the next Coordinator "
                 "action immediately. Do not return a terminal analysis message while the scheduler "
-                "has queued, running, or retryable jobs. Only when neither native launch tool is "
-                "present may the parent execute exactly one returned ticket as serial_parent_worker; "
-                "submit its receipt and resume coordinating. Workers cannot coordinate, spawn "
+                "has queued, running, or retryable jobs. When neither native launch tool is "
+                "present, stop with blocked_requires_fresh_context. Never execute semantic Worker "
+                "work in the parent conversation, which may already contain tests or answer keys. "
+                "Workers cannot coordinate, spawn "
                 "workers, or advance phases."
             ),
         })

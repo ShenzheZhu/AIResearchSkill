@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by AIResearchSkill: validate retained reproduction contracts against their accepted snapshot.
 """Execute one reviewed Bug Validator reproduction without arbitrary commands.
 
 Workers may design a small probe, but only this Coordinator-owned runner may
@@ -30,7 +31,7 @@ def attempt_dir(target: Path, bug_id: str, attempt: int) -> Path:
     return state.skill_dir(target) / "probes" / safe_component(bug_id) / f"attempt_{attempt:03d}"
 
 
-def read_contract(target: Path, bug_id: str, attempt: int, execution_mode: str = "adapter") -> tuple[Path, dict]:
+def read_contract(target: Path, bug_id: str, attempt: int, execution_mode: str = "adapter", *, snapshot_commit: str | None = None) -> tuple[Path, dict]:
     root = attempt_dir(target, bug_id, attempt)
     contract = state.read_json(root / "reproduction.json", None)
     if not isinstance(contract, dict):
@@ -44,7 +45,7 @@ def read_contract(target: Path, bug_id: str, attempt: int, execution_mode: str =
         raise ValueError("reproduction contract has unexpected or missing fields")
     if contract["schema_version"] != 2 or contract["bug_id"] != bug_id or contract["attempt"] != attempt:
         raise ValueError("reproduction contract identity does not match requested attempt")
-    if contract["snapshot_commit"] != state.current_snapshot_commit(target):
+    if contract["snapshot_commit"] != (snapshot_commit or state.current_snapshot_commit(target)):
         raise ValueError("reproduction contract snapshot does not match current analysis worktree")
     language = contract.get("language")
     profile = profile_for_key(language) if isinstance(language, str) else None

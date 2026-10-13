@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Modified by AIResearchSkill: validate static edges and Bug Validator function identity before accepting Worker success.
+# Modified by AIResearchSkill: validate static edges, Bug Validator execution, and durable acceptance receipts.
 """Durable current-job state for host FM-Agent workers; no run history."""
 from __future__ import annotations
 
@@ -387,7 +387,7 @@ def _negative_attempts(target, payload):
     value = payload.get("negative_retries", default)
     if not isinstance(value, int) or value < 0: raise ValueError("negative_retries must be a non-negative integer")
     return value + 1
-def _validate(target, job, result=None):
+def _validate(target, job, result=None, *, snapshot_commit=None):
     errors = []
     missing = [item for item in job.get("required_outputs", []) if not (target / item).exists()]
     if missing: errors.append("missing required worker output: " + ", ".join(missing))
@@ -455,6 +455,7 @@ def _validate(target, job, result=None):
         if job["type"] == "verify_function" and result is not None and result.get("verdict") != verdicts[0]:
             return "Verification Worker receipt verdict does not match its result"
     if job["type"] == "bug_validate" and not job.get("legacy_contract"):
+        snapshot_commit = snapshot_commit or state.current_snapshot_commit(target)
         report = state.read_json(target / job["bug_result_path"], {})
         function_id = job.get("input", {}).get("function_id")
         if not isinstance(function_id, str) or not isinstance(report, dict) or report.get("function_id") != function_id:
@@ -462,10 +463,10 @@ def _validate(target, job, result=None):
         attempts = report.get("attempts") if isinstance(report, dict) else None
         index = int(job.get("negative_attempt_index", 1))
         if not isinstance(attempts, list) or len(attempts) < index: return "Bug Validator result must append the current probe to attempts"
-        if report.get("snapshot_commit") != state.current_snapshot_commit(target): return "Bug Validator report snapshot does not match current analysis worktree"
+        if report.get("snapshot_commit") != snapshot_commit: return "Bug Validator report snapshot does not match accepted analysis"
         if report.get("confirmation_status") not in state.BUG_FINAL_STATUSES: return "Bug Validator report has invalid confirmation status"
         latest = attempts[-1] if attempts else None
-        dynamic_ok, dynamic_reason = state._dynamic_attempt_ready(target, latest, state.current_snapshot_commit(target))
+        dynamic_ok, dynamic_reason = state._dynamic_attempt_ready(target, latest, snapshot_commit)
         if not dynamic_ok: return f"Bug Validator current attempt lacks valid dynamic evidence: {dynamic_reason}"
         if result is not None:
             if latest.get("classification") != result.get("classification"):
@@ -475,6 +476,25 @@ def _validate(target, job, result=None):
             if classification == "confirmed" and status != "confirmed": return "confirmed receipt requires a confirmed report"
             if classification == "inconclusive" and status != "inconclusive": return "inconclusive receipt requires an inconclusive report"
             if classification == "not_reproduced" and status not in {"inconclusive", "rejected"}: return "non-reproduction receipt requires inconclusive or rejected report"
+        import bug_validation_executor
+        if not bug_validation_executor.finalization_matches_current_attempt(target, job):
+            return "Bug Validator finalization does not match its accepted attempt"
+        for recorded in attempts:
+            dynamic_ok, dynamic_reason = state._dynamic_attempt_ready(target, recorded, snapshot_commit)
+            if not dynamic_ok:
+                return f"Bug Validator attempt lacks valid dynamic evidence: {dynamic_reason}"
+            ordinal = recorded.get("ordinal")
+            if not isinstance(ordinal, int) or ordinal < 1:
+                return "Bug Validator attempt has an invalid ordinal"
+            try:
+                bug_id, _ = bug_validation_executor.context(job)
+                expected = bug_validation_executor.attempt_dir(target, bug_id, ordinal) / "reproduction_result.json"
+                if recorded["dynamic_evidence"]["reproduction_result"] != expected.relative_to(target).as_posix():
+                    return "Bug Validator attempt references another attempt's execution evidence"
+                if not bug_validation_executor.execution_result_valid(target, {**job, "attempts": ordinal}, snapshot_commit=snapshot_commit):
+                    return "Bug Validator execution outcome contradicts its recorded command evidence"
+            except ValueError as exc:
+                return f"Bug Validator execution evidence is invalid: {exc}"
     return None
 def _fail(job, kind, message):
     if kind not in FAILURE_CLASSES: raise ValueError("unsupported failure class")
@@ -774,6 +794,67 @@ def _artifact_identity(target, job):
     return combined, values
 
 
+def accepted_job(target, job_id, *, snapshot_commit, input_fingerprint):
+    """Return a Bug Validator job only when its exact durable receipt still verifies."""
+    _safe_id(job_id)
+    path = checkpoint.db_path(target)
+    if not path.is_file():
+        raise ValueError(f"accepted Bug Validator receipt unavailable for {job_id}: scheduler database is missing")
+    connection = None
+    try:
+        connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT j.*, r.snapshot_commit, r.input_fingerprint, "
+            "a.status AS attempt_status, a.input_hash AS attempt_input_hash, a.artifact_hash AS attempt_artifact_hash, "
+            "p.input_hash AS receipt_input_hash, p.artifact_hash AS receipt_artifact_hash, p.payload_json AS receipt_json "
+            "FROM jobs j JOIN runs r ON r.run_id=j.run_id "
+            "JOIN attempts a ON a.job_id=j.job_id AND a.attempt=j.attempt "
+            "JOIN receipts p ON p.job_id=j.job_id AND p.attempt=j.attempt WHERE j.job_id=?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("durable job, attempt, or receipt is missing")
+        run_id = hashlib.sha256(f"{snapshot_commit}\0{input_fingerprint}".encode()).hexdigest()[:24]
+        if (row["run_id"], row["snapshot_commit"], row["input_fingerprint"]) != (run_id, snapshot_commit, input_fingerprint):
+            raise ValueError("receipt belongs to another analysis run")
+        job, receipt = json.loads(row["payload_json"]), json.loads(row["receipt_json"])
+        if not isinstance(job, dict) or job.get("schema_version") != 2 or job.get("legacy_contract") or job.get("type") != "bug_validate":
+            raise ValueError("receipt does not belong to a current Bug Validator job")
+        if job.get("id") != job_id or row["type"] != job["type"] or row["phase"] != job.get("phase"):
+            raise ValueError("job identity differs from its durable row")
+        if row["status"] != "succeeded" or job.get("status") != "succeeded" or row["attempt_status"] != "succeeded":
+            raise ValueError("job or accepted attempt has not succeeded")
+        if row["attempt"] < 1 or job.get("attempts") != row["attempt"]:
+            raise ValueError("receipt does not match the current job attempt")
+        expected_input = _payload_hash(job)
+        if any(value != expected_input for value in (row["input_hash"], job.get("input_hash"), row["attempt_input_hash"], row["receipt_input_hash"])):
+            raise ValueError("accepted input identity differs from the job")
+        if receipt != job.get("result") or receipt != json.loads(row["result_json"]):
+            raise ValueError("receipt payload differs from the accepted job result")
+        error = _validate_report(job, receipt) or _validate(target, job, receipt, snapshot_commit=snapshot_commit)
+        if error:
+            raise ValueError(error)
+        import bug_validation_executor
+        if receipt != bug_validation_executor.canonical_finalization_receipt(target, job):
+            raise ValueError("receipt is not the canonical finalization receipt")
+        computed, artifacts = _artifact_identity(target, job)
+        if computed != row["receipt_artifact_hash"] or computed != row["attempt_artifact_hash"]:
+            raise ValueError("accepted output bytes have changed")
+        stored = connection.execute(
+            "SELECT path,sha256,size FROM artifacts WHERE snapshot_commit=? AND job_id=? AND attempt=? ORDER BY path",
+            (snapshot_commit, job_id, row["attempt"]),
+        ).fetchall()
+        if sorted(artifacts, key=lambda item: item["path"]) != [dict(item) for item in stored]:
+            raise ValueError("accepted artifact rows do not match the current outputs")
+        return job
+    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise ValueError(f"accepted Bug Validator receipt unavailable for {job_id}: {exc}") from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def _record_receipt(target, job, result):
     artifact_hash, artifacts = _artifact_identity(target, job)
     input_hash = job["input_hash"]
@@ -985,15 +1066,12 @@ def aggregate(target):
 
 
 def aggregate_readonly(target):
-    """Read scheduler status without creating a WAL file or changing the DB."""
+    """Read the live scheduler without creating a database or changing its rows."""
     path = checkpoint.db_path(target)
     if not path.is_file():
-        return {"schema_version": SCHEDULER_SCHEMA_VERSION, "pending": 0, "groups": [], "converged": True}
-    # ``immutable=1`` prevents SQLite from creating -wal/-shm side files when
-    # diagnose runs in a read-only sandbox. The diagnostic view is advisory;
-    # the active Coordinator remains the only writer.
+        raise ValueError("scheduler database is missing")
     run_id, _, _ = _run_id(target)
-    connection = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
         rows = connection.execute(
@@ -1013,6 +1091,27 @@ def aggregate_readonly(target):
         "groups": [dict(row) for row in rows],
         "converged": pending == 0 and not any(row["status"] == "failed" for row in rows),
     }
+
+
+def reset_bug_validation_job(target, job_id):
+    """Reset only the selected same-run candidate before an explicit revalidation."""
+    _safe_id(job_id)
+    run_id, _, _ = _run_id(target)
+    connection = _connect(target)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute("SELECT run_id,type,status FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        if row and (row["run_id"] != run_id or row["type"] != "bug_validate" or row["status"] == "running"):
+            raise ValueError("only an inactive Bug Validator candidate from this analysis may be reset")
+        for table in ("receipts", "artifacts", "attempts", "jobs"):
+            connection.execute(f"DELETE FROM {table} WHERE job_id=?", (job_id,))
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    finally:
+        connection.close()
+    _path(target, job_id).unlink(missing_ok=True)
 
 
 def clear_run(target):

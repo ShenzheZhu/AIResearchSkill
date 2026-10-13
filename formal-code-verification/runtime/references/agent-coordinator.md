@@ -1,5 +1,7 @@
 # Host-native Coordinator
 
+Modified by AIResearchSkill: require fresh native Worker contexts.
+
 The current Claude Code or Codex **parent Agent** is the only FM-Agent
 Coordinator. It is not a Worker and must stay active until the durable DAG
 converges or the host forcibly ends the turn.
@@ -11,16 +13,14 @@ converges or the host forcibly ends the turn.
 2. When `action: dispatch_workers`, invoke every returned Worker ticket through the
    host's native subagent mechanism: Claude uses `registered_worker`; Codex
    uses the ticket's `native_launch_tool`, normally
-   `collaboration.spawn_agent`, with one unique task name per job and the
-   immutable definition in the ticket. Launch all returned Codex tickets in
-   parallel. The absence of a named Worker registry does **not** mean Codex
-   has no subagent capability. Only if neither `collaboration.spawn_agent`
-   nor unnamespaced `spawn_agent` is exposed may the parent perform the
-   serial fallback. In that case, do **not** stop the analysis: the
-   current parent Agent performs exactly one ticket as a serial Worker fallback,
-   following the same immutable definition, assigned paths, and receipt
-   contract. It then returns to the Coordinator loop. This fallback preserves
-   correctness and availability but has concurrency one.
+   `collaboration.spawn_agent`, with one unique task name per job and
+   `native_launch_arguments` (`fork_turns="none"`). Pass only the complete
+   ticket, immutable definition and its permitted evidence. Launch returned
+   tickets up to the host's available slots. The absence of a named Worker
+   registry does **not** mean Codex has no subagent capability. If no fresh
+   native context is available, preserve the ticket and report
+   `blocked_requires_fresh_context`; the parent may already contain tests or
+   answers and must not perform semantic Worker work itself.
 3. Submit every Worker receipt immediately, repair/retry when directed, and
    call `phase_driver.py next` again to fill free slots.
 4. When `action: wait_for_completion_event`, wait only for an already-running

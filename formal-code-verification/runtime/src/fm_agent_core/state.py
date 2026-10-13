@@ -1,4 +1,4 @@
-# Modified by AIResearchSkill: exclude standard colocated JavaScript and TypeScript tests.
+# Modified by AIResearchSkill: honor explicit production directories while excluding tests and FM metadata.
 """Small, deterministic helpers for FM-Agent Skill state and artifacts.
 
 These helpers deliberately do not invoke ``main.py`` or an LLM.  They make the
@@ -159,23 +159,26 @@ def fingerprint(project: Path, one_phase: bool, submodules: list[str], extra_edg
     return hashlib.sha256(json.dumps(inputs, ensure_ascii=False, sort_keys=True).encode()).hexdigest(), inputs
 
 
-def source_files(project: Path) -> list[Path]:
-    ignored = {".git", ".venv", "node_modules", "oh_modules", "fm_agent", "fm_agent_skill", "fm_agent_plugin", ".codegraph", "build", "dist", "out", "target", "CMakeFiles"}
+def source_files(project: Path, submodules: list[str] | None = None) -> list[Path]:
+    hard_ignored = {".git", "fm_agent", "fm_agent_skill", "fm_agent_plugin", ".codegraph"}
+    ignored = hard_ignored | {".venv", "node_modules", "oh_modules", "build", "dist", "out", "target", "CMakeFiles"}
     found = []
-    for root, directories, files in os.walk(project):
-        directories[:] = [name for name in directories if name not in ignored]
-        found.extend(Path(root) / name for name in files if Path(name).suffix.lower() in SOURCE_EXTENSIONS and not is_test_source_path((Path(root) / name).relative_to(project).as_posix()))
-    return found
+    for scope in submodules or [""]:
+        start = project / scope
+        if any(part in hard_ignored for part in start.relative_to(project).parts):
+            continue
+        # A declared source directory is an inventory root, even when its name is normally skipped.
+        for root, directories, files in os.walk(start):
+            directories[:] = [name for name in directories if name not in ignored]
+            found.extend(Path(root) / name for name in files if Path(name).suffix.lower() in SOURCE_EXTENSIONS and not is_test_source_path((Path(root) / name).relative_to(project).as_posix()))
+    return list(dict.fromkeys(found))
 
 
 def source_manifest(project: Path, submodules: list[str] | None = None) -> dict:
     """Content identity for production sources, independent of Git HEAD."""
-    scopes = [item.rstrip("/") for item in (submodules or []) if isinstance(item, str) and item.strip()]
     entries = []
-    for path in source_files(project):
+    for path in source_files(project, submodules):
         rel = path.relative_to(project).as_posix()
-        if scopes and not any(rel == scope or rel.startswith(scope + "/") for scope in scopes):
-            continue
         entries.append({"path": rel, "sha256": file_hash(path)})
     entries.sort(key=lambda item: item["path"])
     digest = hashlib.sha256(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -282,13 +285,13 @@ def fingerprint_for_config(project: Path, config: dict) -> tuple[str, dict]:
     )
 
 
-def preflight(project: Path) -> dict:
+def preflight(project: Path, submodules: list[str] | None = None) -> dict:
     issues = []
     try:
         git(project, "rev-parse", "--verify", "HEAD")
     except RuntimeError:
         issues.append("target must be a Git repository with a resolvable HEAD")
-    files = source_files(project)
+    files = source_files(project, submodules)
     if not files:
         issues.append("no supported source files found")
     return {"ok": not issues, "project": str(project), "source_file_count": len(files), "issues": issues}

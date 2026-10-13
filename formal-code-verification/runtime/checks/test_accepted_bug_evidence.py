@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+# Added by AIResearchSkill: verify Bug Validator authority against real durable acceptance receipts.
+"""Accepted Bug Validation evidence cannot fall back to unaccepted files."""
+from __future__ import annotations
+
+import sqlite3
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
+
+from fm_agent_core import state
+import bug_summary
+import bug_validation_executor
+import scheduler
+
+
+def write_accepted_candidate(target: Path, function_id="calc.py::inc", bug_id="candidate", status="confirmed") -> dict:
+    snapshot = state.current_snapshot_commit(target)
+    if not state.active_record(target):
+        state.atomic_json(state.skill_dir(target) / "active.json", {
+            "snapshot_commit": snapshot, "fingerprint": "receipt-check",
+            "mode": "full", "phases": ["bug_validation"], "current_phase": "bug_validation",
+        })
+    output = f"fm_agent/bug_validation/{bug_id}.result.json"
+    job = scheduler.create(target, {
+        "id": f"bug-validation-{bug_id}", "phase": "bug_validation", "type": "bug_validate",
+        "depends_on": [], "required_outputs": [output], "artifacts": [], "negative_retries": 0,
+        "input": {"bug_id": bug_id, "function_id": function_id, "mode": "full"},
+    })
+    scheduler.transition(target, job["id"], "start", None, None, "execution")
+    root = bug_validation_executor.attempt_dir(target, bug_id, 1)
+    entrypoint = {"ecosystem": "host-project-toolchain", "kind": "module", "target": "calc.py", "symbol": "inc"}
+    state.atomic_json(root / "reproduction.json", {
+        "schema_version": 2, "bug_id": bug_id, "attempt": 1, "snapshot_commit": snapshot,
+        "language": "python", "public_entrypoint": entrypoint, "probe_file": "probe.py",
+        "expected_marker": "CONFIRMED", "not_confirmed_marker": "NOT CONFIRMED", "timeout_seconds": 30,
+    })
+    marker = {"confirmed": "CONFIRMED", "rejected": "NOT CONFIRMED", "inconclusive": "no outcome marker"}[status]
+    classification = "not_reproduced" if status == "rejected" else status
+    (root / "probe.py").write_text(f"print({marker!r})\n", encoding="utf-8")
+    evidence = (root / "reproduction_result.json").relative_to(target).as_posix()
+    state.atomic_json(target / evidence, {
+        "schema_version": 1, "execution_mode": "agent-executed", "bug_id": bug_id, "attempt": 1,
+        "snapshot_commit": snapshot, "language": "python", "public_entrypoint": entrypoint,
+        "state": "completed", "classification": classification, "reason": "Recorded public-entry probe outcome",
+        "commands": [{"command": "python3 probe.py", "cwd": root.relative_to(target).as_posix(),
+                      "returncode": 0, "stdout": marker + "\n", "stderr": ""}],
+    })
+    state.atomic_json(target / output, {
+        "schema_version": 1, "bug_id": bug_id, "function_id": function_id, "snapshot_commit": snapshot,
+        "confirmation_status": status,
+        "attempts": [{"ordinal": 1, "classification": classification, "dynamic_evidence": {"reproduction_result": evidence}}],
+    })
+    accepted = scheduler.transition(target, job["id"], "complete", bug_validation_executor.canonical_finalization_receipt(target, job), None, "execution")
+    plan_path = state.control_dir(target) / "job_plans" / "bug_validation.json"
+    entries = state.read_json(plan_path, {}).get("entries", [])
+    entries.append({"function_id": function_id, "job_id": job["id"]})
+    state.atomic_json(plan_path, {
+        "schema_version": 1, "phase": "bug_validation", "snapshot_commit": snapshot,
+        "entries": entries, "created_jobs": len(entries), "total_entries": len(entries),
+    })
+    return accepted
+
+
+class AcceptedBugEvidenceTest(unittest.TestCase):
+    def accepted(self, target: Path, job: dict, **identity) -> dict:
+        return scheduler.accepted_job(target, job["id"], snapshot_commit=identity.get("snapshot_commit", "unversioned"),
+                                      input_fingerprint=identity.get("input_fingerprint", "receipt-check"))
+
+    def test_durable_receipt_survives_json_cleanup_and_different_live_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary).resolve()
+            job = write_accepted_candidate(target)
+            scheduler._path(target, job["id"]).unlink()
+            with patch.object(state, "current_snapshot_commit", return_value="different-live-head"):
+                self.assertEqual(self.accepted(target, job)["status"], "succeeded")
+
+    def test_empty_or_unreadable_ledger_never_accepts_a_saved_job_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary).resolve()
+            job = write_accepted_candidate(target)
+            scheduler.clear_run(target)
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                self.accepted(target, job)
+            with patch.object(scheduler.sqlite3, "connect", side_effect=sqlite3.OperationalError("unreadable ledger")), \
+                 self.assertRaisesRegex(ValueError, "unreadable ledger"):
+                self.accepted(target, job)
+            scheduler.checkpoint.db_path(target).unlink()
+            with self.assertRaisesRegex(ValueError, "database is missing"):
+                self.accepted(target, job)
+            self.assertFalse(scheduler.checkpoint.db_path(target).exists())
+
+    def test_changed_output_or_missing_malformed_or_foreign_receipt_is_unavailable(self) -> None:
+        mutations = {
+            "output": lambda target, job, connection: (target / job["bug_result_path"]).write_text(
+                (target / job["bug_result_path"]).read_text() + "\n", encoding="utf-8"),
+            "missing": lambda target, job, connection: connection.execute("DELETE FROM receipts WHERE job_id=?", (job["id"],)),
+            "malformed": lambda target, job, connection: connection.execute("UPDATE receipts SET payload_json='{}' WHERE job_id=?", (job["id"],)),
+            "foreign": lambda target, job, connection: connection.execute("UPDATE runs SET input_fingerprint='other-inputs'"),
+            "attempt": lambda target, job, connection: connection.execute("UPDATE attempts SET status='running' WHERE job_id=?", (job["id"],)),
+            "input": lambda target, job, connection: connection.execute("UPDATE receipts SET input_hash='different-input' WHERE job_id=?", (job["id"],)),
+            "artifact": lambda target, job, connection: connection.execute("DELETE FROM artifacts WHERE job_id=?", (job["id"],)),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(mutation=name), tempfile.TemporaryDirectory() as temporary:
+                target = Path(temporary).resolve()
+                job = write_accepted_candidate(target)
+                connection = scheduler._connect(target)
+                mutate(target, job, connection)
+                connection.close()
+                with self.assertRaisesRegex(ValueError, "unavailable"):
+                    self.accepted(target, job)
+
+    def test_changed_recorded_command_outcome_cannot_remain_confirmed(self) -> None:
+        for output, returncode in (("", 0), ("NOT CONFIRMED\n", 0), ("CONFIRMED\n", 1)):
+            with self.subTest(output=output, returncode=returncode), tempfile.TemporaryDirectory() as temporary:
+                target = Path(temporary).resolve()
+                job = write_accepted_candidate(target)
+                evidence_path = bug_validation_executor.attempt_dir(target, "candidate", 1) / "reproduction_result.json"
+                evidence = state.read_json(evidence_path, {})
+                evidence["commands"][0].update({"stdout": output, "returncode": returncode})
+                state.atomic_json(evidence_path, evidence)
+                with self.assertRaisesRegex(ValueError, "command evidence"):
+                    self.accepted(target, job)
+
+    def test_adapter_execution_uses_the_same_output_classifier(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary).resolve()
+            job = write_accepted_candidate(target)
+            root = bug_validation_executor.attempt_dir(target, "candidate", 1)
+            contract = state.read_json(root / "reproduction.json", {})
+            contract["public_entrypoint"]["ecosystem"] = "python-packaging"
+            state.atomic_json(root / "reproduction.json", contract)
+            result = state.read_json(root / "reproduction_result.json", {})
+            result.pop("execution_mode")
+            result.pop("commands")
+            result.update({"public_entrypoint": contract["public_entrypoint"], "command": ["python3", "probe.py"],
+                           "returncode": 0, "stdout": "CONFIRMED\n", "stderr": ""})
+            state.atomic_json(root / "reproduction_result.json", result)
+            self.assertTrue(bug_validation_executor.execution_result_valid(target, job))
+            for stdout, returncode in (("", 0), ("NOT CONFIRMED\n", 0), ("CONFIRMED\n", 1)):
+                result.update({"stdout": stdout, "returncode": returncode})
+                state.atomic_json(root / "reproduction_result.json", result)
+                self.assertFalse(bug_validation_executor.execution_result_valid(target, job))
+
+    def test_summary_and_completion_require_real_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch.object(state, "direct_mismatch_ids", return_value={"calc.py::inc"}):
+            target = Path(temporary).resolve()
+            job = write_accepted_candidate(target)
+            self.assertTrue(bug_validation_executor.all_phase_jobs_succeeded(target, "bug_validation"))
+            self.assertEqual(bug_summary.write_summary(target, "full")["total_confirmed"], 1)
+            connection = scheduler._connect(target)
+            connection.execute("DELETE FROM receipts WHERE job_id=?", (job["id"],))
+            connection.close()
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                bug_summary.write_summary(target, "full")
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                bug_validation_executor.all_phase_jobs_succeeded(target, "bug_validation")
+            scheduler.clear_run(target)
+            with self.assertRaisesRegex(ValueError, "no accepted scheduler jobs"):
+                bug_summary.write_summary(target, "full")
+
+
+if __name__ == "__main__":
+    unittest.main()
