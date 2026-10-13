@@ -13,7 +13,7 @@ Use this repository as a cross-agent toolkit.
 ## Skill Map
 
 - Root `SKILL.md`
-  Use as the AI research and engineering skill router. It chooses the focused child skill for OpenReview, rebuttals, validation, LaTeX page reduction, GitHub publishing, web automation, or software-development discipline.
+  Use as the AI research and engineering skill router. It chooses the focused child skill for OpenReview, rebuttals, validation, LaTeX page reduction, GitHub publishing, web automation, formal code verification, or software-development discipline.
 
 - `openreview-submit/`
   Use for OpenReview inspection, author-list updates, profile-id lookup, and batch submission edits.
@@ -34,6 +34,9 @@ Use this repository as a cross-agent toolkit.
   Use for non-trivial software work that needs issue quality, scoped branches,
   commit/push/PR gates, verification discipline, regression handling, subagent
   delegation, or release-train judgment.
+
+- `formal-code-verification/`
+  Use for specification-driven verification and counterexample-guided debugging. Ground requirements independently, run actual repros, and distinguish model/proof limits.
 
 ## Operating Rule
 

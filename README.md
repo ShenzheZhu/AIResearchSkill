@@ -12,7 +12,7 @@ It is designed to work across agents:
 The repository root is also a router skill:
 
 - `SKILL.md`
-  An umbrella router that chooses the right focused skill for OpenReview submissions, reviewer rebuttals, human validation, LaTeX page reduction, GitHub publishing, API-first web automation, and general software-development discipline.
+  An umbrella router that chooses the right focused skill for OpenReview submissions, reviewer rebuttals, human validation, LaTeX page reduction, GitHub publishing, API-first web automation, formal code verification, and general software-development discipline.
 
 ## Structure
 
@@ -37,13 +37,18 @@ The repository root is also a router skill:
 - `evidence-first-rebuttal/`
   Draft, audit, run supporting experiments for, and polish OpenReview-style paper rebuttals with a full final-response Markdown format, reviewer-by-reviewer structure, evidence ledgers, paper-aligned preflight/smoke/full-run discipline, Markdown-ready tables, page-limit handling, agent-style review, and direct non-sycophantic wording.
 
+- `formal-code-verification/`
+  Verify selected code against explicit preconditions, postconditions and invariants. Reproduce counterexamples against actual code, refine abstractions without weakening requirements, and report the boundary between tests, model checks and source proofs. Language-agnostic, with tool guidance for Go, TS/JS, SMT, TLA+, Verus and Gobra.
+
 ## Usage
 
 For Codex:
 
-- Copy or symlink the whole repo into `~/.codex/skills/AIResearchSkill/` to use the root router skill.
-- Copy a skill folder into `~/.codex/skills/`
+- Copy or symlink the whole repo into `~/.agents/skills/AIResearchSkill/` to use the root router skill.
+- Copy a skill folder into `~/.agents/skills/`
 - Or clone this repo and copy the specific folders you want
+
+For specification-driven testing, invoke `$formal-code-verification` with the target code and expected behavior. Ordinary smoke testing does not require a formal analysis.
 
 For Claude Code or other agents:
 
