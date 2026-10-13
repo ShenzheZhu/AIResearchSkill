@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Modified by AIResearchSkill: normalize accepted directory scopes before snapshot relocation.
+# Modified by AIResearchSkill: normalize explicit scopes and require accepted validation evidence before publication.
 """Preflight, Git-snapshot mode selection, and active-analysis preparation."""
 from __future__ import annotations
 
@@ -55,13 +55,13 @@ def inspection_config(args, target):
 
 
 def inspect(target, args, config=None):
-    preflight = state.preflight(target)
-    if not preflight["ok"]: return {"ok": False, "preflight": preflight}
     config = inspection_config(args, target) if config is None else dict(config)
     issues = valid_settings(target, config)
     if issues: return {"ok": False, "issues": issues}
     scopes = [(target / item).resolve().relative_to(target).as_posix() for item in config["submodules"]]
     config["submodules"] = [] if "." in scopes else sorted(set(scopes))
+    preflight = state.preflight(target, config["submodules"])
+    if not preflight["ok"]: return {"ok": False, "preflight": preflight}
     fingerprint, _ = state.fingerprint(target, config["one_phase"], config["submodules"], config.get("extra_edge"), config["knowledge"], config)
     baseline = state.inspect_baseline(target, fingerprint, config["submodules"])
     mode = "noop" if baseline["valid"] and baseline.get("manifest_compatible") else "incremental" if baseline["valid"] else "full"
@@ -236,6 +236,14 @@ def write_partial_validation_summary(target: Path) -> dict:
             or not report["attempts"]
         ):
             continue
+        plan = state.read_json(state.control_dir(target) / "job_plans" / "bug_validation.json", {})
+        entries = plan.get("entries") if isinstance(plan, dict) else None
+        entry = next((item for item in entries or [] if isinstance(item, dict) and item.get("function_id") == function_id), None)
+        if not isinstance(entry, dict) or not isinstance(entry.get("job_id"), str):
+            raise ValueError(f"accepted Bug Validation evidence unavailable for {function_id}: missing job plan")
+        job = scheduler.accepted_job(target, entry["job_id"], snapshot_commit=snapshot_commit, input_fingerprint=state.active_record(target).get("fingerprint", ""))
+        if job.get("bug_result_path") != path.relative_to(target).as_posix():
+            raise ValueError(f"accepted Bug Validation report path does not match {function_id}")
         reports[function_id] = report
     counts = {status: sum(report.get("confirmation_status") == status for report in reports.values()) for status in state.BUG_FINAL_STATUSES}
     summary = {
@@ -263,9 +271,6 @@ def validate_dispatch(source_target, function_id):
     target = Path(snapshot_data["snapshot"]).resolve()
     try:
         lock = acquire(target)
-        scheduler.clear_run(target)
-        for name in ("jobs", "worker_reports"):
-            shutil.rmtree(state.skill_dir(target) / name, ignore_errors=True)
         bug_id = validation_bug_id(function_id)
         for suffix in (".result.json", ".md"):
             (state.fm_dir(target) / "bug_validation" / f"{bug_id}{suffix}").unlink(missing_ok=True)
@@ -281,6 +286,8 @@ def validate_dispatch(source_target, function_id):
         }
         state.atomic_json(state.skill_dir(target) / "active.json", record)
         job_id = f"bug-validation-{bug_id}"
+        scheduler.reset_bug_validation_job(target, job_id)
+        (state.skill_dir(target) / "worker_reports" / f"{job_id}.json").unlink(missing_ok=True)
         output = f"fm_agent/bug_validation/{bug_id}.result.json"
         scheduler.create(target, {"id": job_id, "phase": "bug_validation", "type": "bug_validate", "depends_on": [], "required_outputs": [output], "artifacts": [], "input": {"bug_id": bug_id, "function_id": function_id, "mode": "full"}})
         state.atomic_json(state.control_dir(target) / "job_plans" / "bug_validation.json", {"schema_version": 1, "phase": "bug_validation", "snapshot_commit": record["snapshot_commit"], "entries": [{"function_id": function_id, "job_id": job_id}], "created_jobs": 1, "total_entries": 1})
@@ -297,10 +304,22 @@ def validate_complete(source_target):
     snapshot = Path(snapshot_value)
     record = state.active_record(snapshot)
     scope = record.get("validation_scope") if isinstance(record, dict) else None
-    jobs = scheduler.current_jobs_for_phase(snapshot, "bug_validation")
-    if not isinstance(scope, list) or len(scope) != 1 or len(jobs) != 1 or jobs[0].get("status") != "succeeded":
+    if not isinstance(scope, list) or len(scope) != 1:
         return {"ok": False, "reason": "dynamic validation job has not completed"}
+    jobs = [job for job in scheduler.current_jobs_for_phase(snapshot, "bug_validation") if job.get("input", {}).get("function_id") == scope[0]]
+    if len(jobs) != 1 or jobs[0].get("status") != "succeeded":
+        return {"ok": False, "reason": "dynamic validation job has not completed"}
+    scheduler.accepted_job(snapshot, jobs[0]["id"], snapshot_commit=record["snapshot_commit"], input_fingerprint=record.get("fingerprint", ""))
     result = merge_validation_candidate(source_target, snapshot, scope[0])
+    plan_path = state.control_dir(source_target) / "job_plans" / "bug_validation.json"
+    plan = state.read_json(plan_path, {})
+    entries = plan.get("entries", []) if plan.get("snapshot_commit") == record["snapshot_commit"] else []
+    entries = [entry for entry in entries if entry.get("function_id") != scope[0]]
+    entries.append({"function_id": scope[0], "job_id": jobs[0]["id"]})
+    state.atomic_json(plan_path, {
+        "schema_version": 1, "phase": "bug_validation", "snapshot_commit": record["snapshot_commit"],
+        "entries": entries, "created_jobs": len(entries), "total_entries": len(entries),
+    })
     summary = write_partial_validation_summary(source_target)
     discard_snapshot(snapshot)
     return {"ok": True, "function_id": scope[0], "result": result, "summary": summary}

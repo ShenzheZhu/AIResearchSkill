@@ -48,7 +48,7 @@ For Codex:
 - Copy a skill folder into `~/.agents/skills/`
 - Or clone this repo and copy the specific folders you want
 
-For specification-driven testing, invoke `$formal-code-verification` with the target code and expected behavior. Ordinary smoke testing does not require a formal analysis.
+For specification-driven testing, invoke `$formal-code-verification` with a repository or change scope; it discovers the verification obligations and coverage gaps. Ordinary smoke testing does not require a formal analysis.
 
 For Claude Code or other agents:
 

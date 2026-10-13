@@ -5,6 +5,8 @@ description: Run or safely resume an FM-Agent full, incremental, or no-op correc
 
 # FM-Agent analysis
 
+Modified by AIResearchSkill: Codex semantic Workers require fresh, non-inherited contexts.
+
 This is the sole public analysis entry point. Execute it directly in Claude
 Code or Codex using that host's worker/subagent capability. Never launch,
 import, or shell out to the original FM-Agent project or its remote-LLM
@@ -383,25 +385,15 @@ write paths, and a `host_invocation` object. Claude
 uses `registered_worker`; Codex uses `generic_subagent` through the exact
 `host_invocation.native_launch_tool`—normally
 `collaboration.spawn_agent`—and passes its fixed `developer_instruction`
-unchanged. For Codex, use a distinct task name derived from each `job_id`,
+unchanged, with `native_launch_arguments` (`fork_turns="none"`). Supply only the ticket, immutable definition and permitted evidence; never inherit parent history or test answers. For Codex, use a distinct task name derived from each `job_id`,
 claim it, then launch its returned ticket in parallel. The lack of a named-plugin Worker
 registry is not evidence that native subagents are unavailable. Never paste
 or paraphrase the contract, ask an Agent to read the job plan, generate a
 Workflow script, or launch more workers than returned tickets.
 
-If the current Codex/Claude host does not expose any native subagent launch
-capability, it must not report the run blocked. Execute one returned ticket as
-the current parent Agent's **serial Worker fallback**, using the same immutable
-ticket and Worker definition, submit its receipt, and call `phase_driver.py
-next` again. This is an availability fallback only; it never lets the Worker
-advance a phase or mutate scheduler control state, and it reduces concurrency
-to one.
-
-When serial fallback is selected, request and claim only one ticket at a time with
-`phase_driver.py next --limit 1`.
-
-Serial fallback is intentionally bounded to the current host turn. If the
-turn ends after a submitted ticket, preserve the durable state and report the
+If a fresh native Worker cannot be launched, preserve the ticket as blocked.
+Do not substitute parent semantic execution, inherited context, or a nested CLI.
+If the turn ends after a submitted ticket, preserve the durable state and report the
 exact next `phase_driver.py next` action as **incomplete**, never as an
 analysis result. The next ordinary FM-Agent request resumes the same job set.
 
@@ -693,6 +685,13 @@ Immediately before any terminal user report, run `terminal_report.py --project`
 on the original user worktree.  Generate the response only from its structured
 output; never supplement its findings.  If `official_result_available` is false,
 report only the incomplete state and reason.
+
+Keep `reasoning.counts/gaps`, dynamic counts and `business_coverage` separate.
+Missing or invalid business coverage makes `audit_status` incomplete; unresolved
+reasoning or business rows remain visible as `completed_with_gaps`. A saved
+report cannot replace the current accepted scheduler receipt and execution
+evidence. Missing, empty, unreadable or unfinished scheduler authority is
+unavailable even when a previous completion file exists.
 
 A function may appear under **confirmed bugs** only when its direct `MISMATCH`
 has a `bug_validation/*.result.json` whose status is `confirmed` and whose

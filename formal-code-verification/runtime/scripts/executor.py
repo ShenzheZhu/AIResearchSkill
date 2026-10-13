@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Modified by AIResearchSkill: reuse the shared production/test path predicate.
+# Modified by AIResearchSkill: keep extraction and phase inventory aligned with explicit production scopes.
 """Host-neutral deterministic FM-Agent Skill executor.
 
 This module deliberately never imports or invokes the original FM-Agent. The
@@ -23,12 +23,7 @@ def _safe(value: str) -> str:
 
 
 def _sources(target: Path, submodules: list[str]) -> list[Path]:
-    result = []
-    for source in state.source_files(target):
-        rel = source.relative_to(target).as_posix()
-        if submodules and not any(rel == item.rstrip("/") or rel.startswith(item.rstrip("/") + "/") for item in submodules): continue
-        result.append(source)
-    return result
+    return state.source_files(target, submodules)
 
 
 def normalize_phases(target: Path) -> dict:
@@ -40,6 +35,11 @@ def normalize_phases(target: Path) -> dict:
     path = state.fm_dir(target) / "phases.json"; raw = state.read_json(path, {})
     phases = raw.get("phases") if isinstance(raw, dict) else None
     if not isinstance(phases, list): raise ValueError("phases.json must contain a phases array")
+    saved = state.read_json(state.skill_dir(target) / "config.json", {})
+    inputs = state.active_record(target).get("inputs", {})
+    submodules = inputs.get("submodules", saved.get("submodules", []))
+    inventory = _sources(target, submodules)
+    production_paths = {source.relative_to(target).as_posix() for source in inventory}
     # Workers commonly use stable phase IDs in dependencies (for example
     # ``phase-1-foundation-types``), while the normalized schema uses ordinal
     # integers.  Resolve both forms at the deterministic boundary so a
@@ -77,7 +77,7 @@ def normalize_phases(target: Path) -> dict:
                 candidate = (target / source).resolve()
                 if target not in candidate.parents or not candidate.is_file(): raise ValueError(f"phase {number} references missing source: {source}")
                 rel = candidate.relative_to(target).as_posix()
-                if not state.is_test_source_path(rel):
+                if rel in production_paths:
                     sources.append(rel)
             if sources: clean_modules.append({"name": str(module.get("name", f"phase-{number}")), "description": str(module.get("description", "")), "source_files": sorted(set(sources))})
         dependencies = phase.get("depends_on_phases", phase.get("depends_on", phase.get("dependencies", [])))
@@ -93,7 +93,8 @@ def normalize_phases(target: Path) -> dict:
     if not production: raise ValueError("no production phases remain after normalization")
     numbers = {item["original_phase"]: index for index, item in enumerate(production, 1)}
     normalized = [{"phase": index, "name": item["name"], "description": item["description"], "modules": item["modules"], "depends_on_phases": [numbers[value] for value in item["dependencies"] if value in numbers and numbers[value] < index]} for index, item in enumerate(production, 1)]
-    data = {"project": target.name, "languages": sorted({source.suffix.lower().lstrip(".") for source in _sources(target, [])}), "file_extensions": sorted({source.suffix.lower().lstrip(".") for source in _sources(target, [])}), "phases": normalized}
+    extensions = sorted({source.suffix.lower().lstrip(".") for source in inventory})
+    data = {"project": target.name, "languages": extensions, "file_extensions": extensions, "phases": normalized}
     state.atomic_json(path, data); return {"phase_count": len(normalized), "phases": [item["phase"] for item in normalized]}
 
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by AIResearchSkill: use the active analysis source scope in the preflight gate.
 """Validate phase contracts before pipeline state may advance."""
 from __future__ import annotations
 
@@ -77,7 +78,7 @@ def validate(target, mode, phase, submodules):
     scoped = state.scoped_functions(target, submodules)
     selected = selected_functions(target)
     checks = {
-        "preflight": lambda: state.preflight(target)["ok"],
+        "preflight": lambda: state.preflight(target, submodules)["ok"],
         "project_understanding": lambda: state.phases_schema_ready(target)[0],
         "phase_cleanup": lambda: state.phases_schema_ready(target)[0],
         "extraction": lambda: bool(state.scoped_functions(target, submodules)),

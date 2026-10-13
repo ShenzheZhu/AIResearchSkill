@@ -19,7 +19,7 @@ does not authorize product fixes; apply none unless the user requests them.
 
 The Coordinator or a read-only scout may inspect existing tests to discover
 missing coverage. Do this before FM-Agent phase planning and keep it outside
-semantic Worker inputs. Immutable Spec, Verify, and Bug Workers never read
+semantic Worker inputs. Launch semantic Workers with `fork_turns="none"`; supply only tickets, immutable definitions and permitted evidence. Never inherit the discovery parent's test/answer history. Immutable Spec, Verify, and Bug Workers never read
 project tests. Give them distilled requirements and caller intent with source
 citations, never test solutions, expected bug triggers, or known-bug answer keys.
 Keep their full definitions, tickets, allowed paths, and runtime gates unchanged.
@@ -33,7 +33,7 @@ Keep their full definitions, tickets, allowed paths, and runtime gates unchanged
    For a whole repository, enumerate all critical flows and process them in
    batches; retain unprocessed or unsupported flows visibly. For a change scope,
    expand only to dependencies and consumers whose behavior the change affects,
-   recording why each added path belongs. Do not silently shrink the request.
+   recording why each added path belongs. Default inventory exclusions are advisory: inspect served/deployed entrypaths and explicitly select real production directories such as `dist/` when required. Do not silently shrink the request.
 2. **Discover obligations.** Trace relevant permissions, ownership and data
    invariants, failure/recovery behavior, duplicate requests, concurrent calls,
    process restart, and state shared across modules. Follow writes through their
@@ -54,13 +54,12 @@ Keep their full definitions, tickets, allowed paths, and runtime gates unchanged
 4. **Account for coverage.** Maintain the ledger below as evidence arrives.
    Deduplicate by business obligation, observable path, and failure mode: several
    functions or probes may support one row. Split rows only for distinct outcomes
-   or boundaries. Reuse linked evidence; never count duplicate executions as
+   or boundaries. Group overlapping actual source directories/files into one batch before dispatch; two business flows sharing `scripts/shop.py` reuse one extraction/specification/verification run. Reuse linked evidence; never count duplicate executions as
    broader coverage. Retain unknown, failed, and passed rows with their limits.
 
 ## Discovery and ledger template
 
-Write `discovery.md` and `coverage.md` at the external analysis checkout root;
-link existing runtime artifacts instead of creating another execution system.
+Write discovery notes outside product code. Keep the canonical ledger at `fm_agent_skill/control/business_coverage.json` in the active analysis checkout; a readable Markdown table is derived from it, not a second editable truth. Link existing runtime artifacts instead of creating another execution system.
 Include source state, requested/expanded scope, critical flow inventory, batch
 progress, unresolved requirements, and exclusions. Distilled requirement notes
 may be external Markdown `--knowledge` inputs materialized by the runtime.
@@ -81,6 +80,25 @@ Unknowns: <missing requirement, environment, adapter, or execution capability>
 | --- | --- | --- | --- | --- |
 | `<flow>` | `<one unique obligation>` | `<discovery entry + spec>` | `<runtime artifact, source state, input/schedule, observation>` | `<unknown / failed / passed; evidence level and uncovered boundary>` |
 
+Record the ledger before finalization. Its minimal schema is:
+
+```json
+{
+  "schema_version": 1,
+  "snapshot_commit": "the active analysis snapshot",
+  "rows": [{
+    "id": "lookahead",
+    "flow": "peek -> next",
+    "requirement": "public API docstring: peek preserves the next logical item",
+    "status": "unknown",
+    "evidence": [],
+    "limitation": "actual execution has not run"
+  }]
+}
+```
+
+Evidence entries name a project-relative `path` and a `level`: `reasoning`, `actual-code`, `integration`, or `machine-verifier`. Passed/failed rows require completed execution validated through the runtime's reproduction-result contract; a claimed level or existing file is insufficient. `confirmed` supports a failed obligation; a successful negative probe supports only the explicitly bounded passed case. Unsupported, inconclusive, raw build logs and other unvalidated records keep the obligation unknown. Unknown rows remain visible and may link reasoning artifacts. After execution, update the same row and its limits rather than creating duplicate coverage.
+
 Keep evidence levels distinct: **LLM reasoning** is a model-derived MATCH or
 static candidate; **actual-code reproduction** executes a concrete public path;
 **flow integration** executes the relevant real module/job/persistence chain;
@@ -95,6 +113,6 @@ only for the claim supported by the named evidence, retaining input, schedule,
 model, and integration limits. Passing finite probes does not prove all inputs.
 Use `terminal_report.py` as the runtime's finding authority; a failed gate yields
 an incomplete report, never findings promoted from discovery notes. Report
-remaining flows, unknown requirements, and skipped execution explicitly. Never
+remaining flows, unknown requirements, and skipped execution explicitly. Check `reasoning.counts/gaps`, qualified dynamic result counts, and `business_coverage` separately. Missing/invalid coverage or unavailable accepted receipts leaves `audit_status: incomplete`; do not call the audit complete. Unknown coverage with actual limitations is `completed_with_gaps`, not universal correctness. Continue pending executable obligations before closing, and retain genuine environment/requirement blockers visibly. Never
 claim zero bugs, universal correctness, or whole-repository coverage from a
 clean batch, reasoning MATCH, or passing tests.

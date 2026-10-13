@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by AIResearchSkill: require fresh Codex Worker contexts instead of semantic parent fallback.
 """Deterministic bridge between FM-Agent jobs and host-native semantic workers.
 
 This script never invokes Claude, Codex, or another model.  It owns the fragile
@@ -244,7 +245,7 @@ def dispatch(target: Path, phase: str, limit: int, host: str = "auto") -> dict:
         "action": "host_workers" if actions else "wait_or_finish",
         "phase": phase,
         "dispatches": actions,
-        "instruction": "Follow each dispatch's host_invocation. In Codex, first call host_invocation.native_launch_tool (collaboration.spawn_agent) for every returned ticket and launch them in parallel; a missing named Worker registry is not a missing subagent capability. Claude may select registered_worker by name. Only if neither native launch tool exists may the current parent Agent execute exactly one ticket as serial_parent_worker, submit its receipt, and resume coordination.",
+        "instruction": "Follow each dispatch's host_invocation. In Codex, call the native launch tool with native_launch_arguments (fork_turns='none') for every returned ticket; pass only its ticket, immutable definition and permitted evidence. A missing named registry is not a missing subagent capability. If a fresh native Worker cannot be launched, preserve the ticket as blocked; do not substitute inherited history, parent semantic execution or a nested CLI.",
     }
 
 

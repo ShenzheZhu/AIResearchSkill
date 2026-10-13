@@ -72,7 +72,11 @@ CONFIRMED
 peek_is_a=True; next_is_a=False; next_is_b=True
 ```
 
-The authoritative terminal report recorded `official_result_available: true`, 13 verification results and one dynamically confirmed candidate. The pilot also exposed cleanup deleting execution evidence before publication; its accepted evidence was recovered with the official checkpoint restore, and the packaged cleanup was corrected and regression-tested. Keep both the native probe and its recorded output, rather than relying on the prose summary.
+The original report recorded a confirmation, but later reliability checks found that cleanup had erased its durable scheduler receipt. Restoring probe files from a checkpoint did not restore acceptance authority. Under the corrected gate that old record is unavailable; it cannot be promoted from the report file alone.
+
+The same unchanged candidate was then revalidated through actual native preparation, execution and finalization Workers, each launched with `fork_turns="none"`. The new public-entry probe again exited zero with `CONFIRMED`: `peek_returned_first=true`, `next_returned_peeked=false`, `next_returned_second=true`. Its new receipt passed the shared SQLite acceptance check before publication. This reran Bug Validation, not the preceding 13-function semantic analysis.
+
+The resulting terminal report contains `official_result_available: true`, one dynamically confirmed candidate, one reasoning `INCONCLUSIVE`, and one `DEPENDENCY_RISK`. Its canonical business ledger has 11 obligations: one failed by actual-code evidence and ten unknown. It therefore reports **`audit_status: completed_with_gaps`**, never full business coverage. Dynamic `inconclusive: 0` is now named `dynamic_inconclusive`; it does not erase reasoning or business gaps. Keep the native probe, output and durable acceptance together.
 
 Expected artifact paths in the analysis checkout:
 
@@ -80,6 +84,8 @@ Expected artifact paths in the analysis checkout:
 - `fm_agent/logic_verification_results/selected/more-peek-9.json`: actual A, witness and offending statements.
 - `fm_agent_skill/probes/09610e65f45dd0d9/attempt_001/`: executable public-package probe and recorded command/output.
 - `fm_agent_skill/control/terminal_report.json`: accepted final classification.
+- `fm_agent_skill/control/business_coverage.json`: independent obligations, evidence levels and visible uncovered boundaries.
+- `fm_agent_skill/checkpoint/state.db`: current accepted job/attempt/receipt and artifact identities; a report file alone cannot replace these records.
 
 The separate replay observed historical 4/8 passing, fixed 8/8 and recorded current 8/8. Four historical failing scenarios exercise one root defect. This trial does not cover other components, languages or integration environments.
 

@@ -1,3 +1,4 @@
+# Modified by AIResearchSkill: require isolated native Worker contexts.
 """Host-neutral semantic Worker contracts.
 
 Claude can select plugin Workers by name. Codex plugins cannot bundle custom
@@ -92,26 +93,32 @@ def invocation(worker: str, host: str = "auto") -> dict:
             # cannot invoke host tools itself; the current Codex Agent can.
             "native_launch_tool": "collaboration.spawn_agent",
             "native_launch_fallback_tool": "spawn_agent",
+            "native_launch_arguments": {"fork_turns": "none"},
             "launch_mode": "parallel_when_available",
-            "fallback": "serial_parent_worker",
+            "fallback": "blocked_requires_fresh_context",
             "developer_instruction": (
                 "The Coordinator must first use collaboration.spawn_agent when that native tool is "
                 "available (or spawn_agent when exposed without a namespace). Start one generic "
-                "subagent for this returned ticket; do not treat the lack of a named Worker registry "
-                "as missing subagent capability. Give it the ticket path and this immutable "
-                "worker_definition, then require it to read both completely and execute them exactly. "
+                "subagent for this returned ticket with native_launch_arguments (fork_turns='none'); "
+                "do not inherit the parent conversation. Do not treat the lack of a named Worker "
+                "registry as missing subagent capability. Give it only the ticket path, this immutable "
+                "worker_definition, and evidence permitted by that ticket, then require it to read "
+                "both contracts completely and execute them exactly. "
                 "Do not paraphrase either contract, inspect unassigned paths, or create a Workflow script. "
-                "Use serial_parent_worker only when neither native launch tool exists in the current host."
+                "If neither native launch tool exists, stop with blocked_requires_fresh_context. "
+                "The parent must never perform semantic Worker work: its conversation may contain "
+                "tests, answer keys, issue labels, or previous conclusions that are not permitted evidence."
             ),
         }
     return {
         **common,
         "host": resolved,
         "kind": "host_selected",
-        "fallback": "serial_parent_worker",
+        "fallback": "blocked_requires_fresh_context",
         "developer_instruction": (
             "If this host cannot select the Worker by name, launch a generic subagent. If the host "
-            "does not expose any subagent capability, the current parent Agent must act as one serial "
-            "Worker: read the dispatch ticket and worker_definition completely and execute them exactly."
+            "does not expose a fresh subagent context, stop with blocked_requires_fresh_context. "
+            "Do not perform semantic Worker work in the parent conversation. Pass only the dispatch "
+            "ticket, immutable worker_definition, and evidence permitted by that ticket."
         ),
     }

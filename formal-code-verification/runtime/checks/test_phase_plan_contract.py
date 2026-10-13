@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by AIResearchSkill: resolve macOS temporary-directory aliases in fixtures.
 """Regression checks for phase-plan compatibility and scheduler admission."""
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ import scheduler  # noqa: E402
 class PhasePlanContractTest(unittest.TestCase):
     def test_legacy_source_list_and_depends_on_are_normalized_before_success(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            project = Path(temporary)
+            project = Path(temporary).resolve()
             (project / "student.h").write_text("class Student {};\n", encoding="utf-8")
             (project / "student.cpp").write_text("#include \"student.h\"\n", encoding="utf-8")
             plan_dir = project / "fm_agent"

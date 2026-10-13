@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by AIResearchSkill: isolate canonical receipt acceptance from subsequent Worker dispatch.
 """Regression checks for canonical Bug Validation finalization receipts."""
 from __future__ import annotations
 
@@ -48,6 +49,7 @@ class BugValidationReceiptTest(unittest.TestCase):
             with patch.object(bug_validation_executor, "load_job", return_value=job), \
                  patch.object(bug_validation_executor, "finalization_matches_current_attempt", return_value=True), \
                  patch.object(bug_validation_executor.scheduler, "transition", side_effect=transition), \
+                 patch.object(bug_validation_executor, "next_action", return_value={"action": "terminal", "status": "succeeded"}), \
                  patch.object(bug_validation_executor, "all_phase_jobs_succeeded", return_value=False):
                 bug_validation_executor.submit_finalization(target, job["id"], {
                     "job_id": job["id"], "status": "completed", "outputs": [output],

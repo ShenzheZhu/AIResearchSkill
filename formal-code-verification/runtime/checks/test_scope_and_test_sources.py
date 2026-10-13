@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by AIResearchSkill: cover declared production directories through inventory, extraction, and phases.
 """Accepted scopes and test exclusions stay consistent through extraction."""
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ from contextlib import redirect_stdout
 import io
 import json
 from pathlib import Path
+import runpy
 import sys
 import tempfile
 import unittest
@@ -18,6 +20,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import executor
 import orchestrate
+import stage_gate
 from fm_agent_core import state
 
 
@@ -63,6 +66,65 @@ class ScopeAndTestSourcesTest(unittest.TestCase):
                     result = self.inspect(target, [".", invalid])
                     self.assertFalse(result["ok"])
                     self.assertEqual(result["issues"], [f"invalid --submodule: {invalid}"])
+
+    def test_declared_dist_only_project_reaches_preflight_extraction_and_phases(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch.object(state, "current_snapshot_commit", return_value="unversioned"):
+            target = Path(temporary).resolve()
+            paths = ["dist/api.py", "dist/test_api.py", "dist/tests/api.py", "build/generated.py", "out/generated.py", "dist/build/generated.py", "dist/fm_agent/generated.py"]
+            for path in paths:
+                source = target / path
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("def api():\n    return 1\n")
+            with patch.object(state, "git", return_value="revision"):
+                self.assertFalse(state.preflight(target)["ok"])
+                self.assertEqual(state.preflight(target, ["dist"])["source_file_count"], 1)
+                args = argparse.Namespace(submodules=[str(target / "dist")], knowledge=[], extra_edge=None, codegraph=False, one_phase=False)
+                with patch.object(state, "inspect_baseline", return_value={"valid": False}):
+                    inspected = orchestrate.inspect(target, args)
+            self.assertTrue(inspected["ok"], inspected)
+            scopes = inspected["config"]["submodules"]
+            self.assertEqual(scopes, ["dist"])
+            state.atomic_json(state.skill_dir(target) / "active.json", {"inputs": {"submodules": scopes}})
+            with patch.object(state, "git", return_value="revision"), patch.object(state, "snapshot_sources_clean", return_value=True):
+                gate = stage_gate.validate(target, "full", "preflight", state.active_record(target)["inputs"]["submodules"])
+            self.assertTrue(gate["ok"], gate)
+            for arguments in ([], ["--submodule", str(target / "dist")]):
+                output = io.StringIO()
+                with patch.object(sys, "argv", ["preflight.py", "--project", str(target), *arguments]), patch.object(state, "git", return_value=""), redirect_stdout(output):
+                    with self.assertRaises(SystemExit) as exited:
+                        runpy.run_path(str(ROOT / "scripts/preflight.py"))
+                self.assertEqual(exited.exception.code, 0, output.getvalue())
+                self.assertEqual(json.loads(output.getvalue())["source_file_count"], 1)
+            self.assertEqual([item["path"] for item in state.source_manifest(target, scopes)["files"]], ["dist/api.py"])
+            extracted = executor.extract(target, scopes)
+            self.assertEqual(extracted["function_count"], 1)
+            self.assertEqual(extracted["index"]["functions"][0]["path"], "dist/api.py")
+            manifest = state.read_json(state.fm_dir(target) / "extraction_manifest.json", {})
+            self.assertEqual(manifest["functions"][0]["source_path"], "dist/api.py")
+            state.atomic_json(state.skill_dir(target) / "config.json", {"submodules": ["build"]})
+            state.atomic_json(state.fm_dir(target) / "phases.json", {"phases": [{"phase": 1, "name": "API", "modules": [{"source_files": paths}], "depends_on_phases": []}]})
+            executor.normalize_phases(target)
+            phases = state.read_json(state.fm_dir(target) / "phases.json", {})
+            self.assertEqual(phases["file_extensions"], ["py"])
+            self.assertEqual(phases["phases"][0]["modules"][0]["source_files"], ["dist/api.py"])
+            executor.graph(target)
+            self.assertTrue(state.phase_layers_ready(target)[0])
+
+    def test_declared_js_ts_paths_override_only_selected_default_skips(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary).resolve()
+            production = ["dist/app.js", "build/client.ts", "out/entry.mjs", "src/dist/native.ts"]
+            excluded = ["dist/app.test.js", "build/client.spec.ts", "out/tests/entry.mjs", "src/dist/__tests__/native.ts", "target/generated.js", "src/build/generated.ts", "fm_agent/generated.ts", "fm_agent_skill/generated.ts", "fm_agent_plugin/generated.js", ".codegraph/generated.js", ".git/generated.ts"]
+            for path in production + excluded:
+                source = target / path
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("function api() { return 1; }\n")
+            self.assertEqual(state.source_files(target), [])
+            scopes = ["dist", "build", "out", "src/dist", "src", "dist"]
+            self.assertEqual(sorted(path.relative_to(target).as_posix() for path in state.source_files(target, scopes)), sorted(production))
+            self.assertEqual([item["path"] for item in state.source_manifest(target, scopes)["files"]], sorted(production))
+            for scope in (".git", "fm_agent", "fm_agent_skill", "fm_agent_plugin", ".codegraph"):
+                self.assertEqual(state.source_files(target, [scope]), [])
 
     def test_dispatch_reuses_normalized_config_after_snapshot_relocation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

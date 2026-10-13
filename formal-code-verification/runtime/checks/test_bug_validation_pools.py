@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by AIResearchSkill: resolve macOS aliases and supply approved execution evidence before finalization.
 """Regression checks for separate Bug Validation execution/finalize pools."""
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from fm_agent_core import state  # noqa: E402
 
 class BugValidationPoolsTest(unittest.TestCase):
     def _target(self, temporary: str) -> Path:
-        target = Path(temporary)
+        target = Path(temporary).resolve()
         state.atomic_json(target / "fm_agent_skill" / "active.json", {
             "snapshot_commit": "unversioned", "fingerprint": "pool-test",
             "phases": ["bug_validation"], "current_phase": "bug_validation",
@@ -61,6 +62,22 @@ class BugValidationPoolsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             target = self._target(temporary)
             scheduler.transition(target, "bug-0", "start", None, None, "execution")
+            root = target / "fm_agent_skill/probes/bug-0/attempt_001"
+            entry = {"ecosystem": "host-project-toolchain", "kind": "module", "target": "calc.py", "symbol": "value"}
+            (target / "calc.py").write_text("def value(): return 1\n", encoding="utf-8")
+            state.atomic_json(root / "reproduction.json", {
+                "schema_version": 2, "bug_id": "bug-0", "attempt": 1, "snapshot_commit": "unversioned",
+                "language": "python", "public_entrypoint": entry, "probe_file": "probe.py", "timeout_seconds": 30,
+                "expected_marker": "CONFIRMED", "not_confirmed_marker": "NOT CONFIRMED",
+            })
+            (root / "probe.py").write_text('print("CONFIRMED")\n', encoding="utf-8")
+            state.atomic_json(root / "reproduction_result.json", {
+                "schema_version": 1, "execution_mode": "agent-executed", "bug_id": "bug-0", "attempt": 1,
+                "snapshot_commit": "unversioned", "language": "python", "public_entrypoint": entry,
+                "state": "completed", "classification": "confirmed", "reason": "Recorded probe reproduced the mismatch",
+                "commands": [{"command": "python3 probe.py", "cwd": root.relative_to(target).as_posix(), "returncode": 0,
+                              "stdout": "CONFIRMED\n", "stderr": ""}],
+            })
             scheduler.mark_bug_validation_ready_to_finalize(target, "bug-0")
 
             listed = durable_executor.next_actions(target, limit=4)

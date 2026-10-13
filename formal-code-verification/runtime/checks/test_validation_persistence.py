@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Modified by AIResearchSkill: verify completed evidence survives cleanup and publication.
+# Modified by AIResearchSkill: verify genuinely accepted evidence survives cleanup, publication, and cumulative summaries.
 """Regression checks for cumulative on-demand Bug Validation artifacts."""
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ import orchestrate  # noqa: E402
 import isolation  # noqa: E402
 import reset_full_artifacts  # noqa: E402
 import scheduler  # noqa: E402
-import terminal_report  # noqa: E402
 from fm_agent_core import state  # noqa: E402
+from test_accepted_bug_evidence import write_accepted_candidate
 
 
 def bug_id(function_id: str) -> str:
@@ -67,19 +67,15 @@ class ValidationPersistenceTest(unittest.TestCase):
             first, second, stale = "src/a.c::first", "src/b.c::second", "src/old.c::stale"
             root = target / "fm_agent" / "bug_validation"
             root.mkdir(parents=True)
-            for function_id, status, snapshot in (
-                (first, "confirmed", "baseline"),
-                (second, "rejected", "baseline"),
-                (stale, "confirmed", "old-baseline"),
-            ):
-                (root / f"{bug_id(function_id)}.result.json").write_text(json.dumps({
-                    "function_id": function_id,
-                    "snapshot_commit": snapshot,
-                    "confirmation_status": status,
-                    "attempts": [{"ordinal": 1}],
-                }), encoding="utf-8")
+            target = target.resolve()
+            write_accepted_candidate(target, first, bug_id(first))
+            write_accepted_candidate(target, second, bug_id(second), "rejected")
+            (root / f"{bug_id(stale)}.result.json").write_text(json.dumps({
+                "function_id": stale, "snapshot_commit": "old-baseline", "confirmation_status": "confirmed",
+                "attempts": [{"ordinal": 1}],
+            }), encoding="utf-8")
             with patch.object(orchestrate.state, "direct_mismatch_ids", return_value={first, second}), \
-                 patch.object(orchestrate.state, "baseline_commit", return_value="baseline"):
+                 patch.object(orchestrate.state, "baseline_commit", return_value="unversioned"):
                 summary = orchestrate.write_partial_validation_summary(target)
             self.assertEqual(summary["dynamic_validation"], "partial")
             self.assertEqual(summary["validated_function_ids"], [first, second])
@@ -95,7 +91,6 @@ class ValidationPersistenceTest(unittest.TestCase):
             snapshot.mkdir()
             function_id = "src/a.c::first"
             digest = bug_id(function_id)
-            output = f"fm_agent/bug_validation/{digest}.result.json"
             evidence = f"fm_agent_skill/probes/{digest}/attempt_001/reproduction_result.json"
             state.atomic_json(isolation.marker_path(snapshot), {
                 "source_project": str(source), "snapshot_commit": "unversioned",
@@ -104,26 +99,10 @@ class ValidationPersistenceTest(unittest.TestCase):
                 "snapshot_commit": "unversioned", "fingerprint": "test", "current_phase": "bug_validation",
                 "phases": ["bug_validation"], "phase_status": {"bug_validation": {"status": "running"}},
             })
-            state.atomic_json(snapshot / evidence, {
-                "snapshot_commit": "unversioned", "state": "completed", "classification": "confirmed",
-                "reason": "public-entry execution violated the expected result",
-            })
-            state.atomic_json(snapshot / output, {
-                "function_id": function_id, "snapshot_commit": "unversioned", "confirmation_status": "confirmed",
-                "attempts": [{"ordinal": 1, "classification": "confirmed", "dynamic_evidence": {"reproduction_result": evidence}}],
-            })
-            job = scheduler.create(snapshot, {
-                "id": f"bug-validation-{digest}", "phase": "bug_validation", "type": "bug_validate",
-                "required_outputs": [output], "artifacts": [], "depends_on": [],
-                "input": {"function_id": function_id, "bug_id": digest, "mode": "full"},
-            })
-            scheduler.transition(snapshot, job["id"], "start", None, None, "execution")
-            accepted = scheduler.transition(snapshot, job["id"], "complete", {
-                "job_id": job["id"], "status": "completed", "outputs": [output], "classification": "confirmed",
-            }, None, "execution")
-            self.assertEqual(accepted["status"], "succeeded")
+            job = write_accepted_candidate(snapshot, function_id, digest)
+            self.assertEqual(job["status"], "succeeded")
             state.atomic_json(state.skill_dir(snapshot) / "worker_reports" / "transient.json", {})
-            state.atomic_json(terminal_report.checkpoint.root(source) / "official_result.json", {
+            state.atomic_json(scheduler.checkpoint.root(source) / "official_result.json", {
                 "official_result_available": True,
             })
 
@@ -139,11 +118,7 @@ class ValidationPersistenceTest(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM receipts WHERE job_id=?", (job["id"],)).fetchone()[0], 1)
             finally:
                 connection.close()
-            with patch.object(terminal_report.checkpoint, "validate", return_value={"snapshot_commit": "unversioned", "checkpoint_id": "test"}), \
-                 patch.object(terminal_report, "_verification_results", return_value=[{"function_id": function_id, "verdict": "MISMATCH"}]):
-                report = terminal_report.build(source)
-            self.assertEqual(report["counts"]["confirmed"], 1)
-            self.assertEqual(report["counts"]["static_findings"], 0)
+            self.assertEqual(scheduler.accepted_job(source, job["id"], snapshot_commit="unversioned", input_fingerprint="test")["status"], "succeeded")
 
             reset_full_artifacts.reset(source)
             self.assertFalse((source / evidence).exists())
