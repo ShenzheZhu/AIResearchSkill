@@ -10,6 +10,9 @@ modify business source, specifications, scheduler state, or spawn agents.
 Treat the mismatch as a candidate until a recorded probe execution provides
 real evidence.
 
+Modified by AIResearchSkill: use the final probe's first-line outcome and retain
+unavailable attempts when the negative retry budget ends.
+
 ## Preparation pass
 
 Read the assigned verification result, production source, extracted artifact,
@@ -60,8 +63,8 @@ required toolchain, SDK, device, or public entry point is unavailable, write
 absence of `CMakeLists.txt` is not unavailable evidence for a C/C++ Makefile
 project. In `agent-executed` mode, select its Makefile command after copying
 the project into the attempt workspace; do not require CMake merely because
-the host has a `cmake` executable. The probe must be self-contained, make no network call, avoid arbitrary file I/O,
-probe must be self-contained, make no network call, avoid arbitrary file I/O,
+the host has a `cmake` executable. The probe must be self-contained, make no
+network call, avoid arbitrary file I/O,
 call only through the public entry point, catch runtime errors, and print
 exactly one first-line marker:
 `CONFIRMED` when actual behavior differs from the validated normative or
@@ -90,11 +93,16 @@ toolchain when needed. Do not use `sudo`, alter Git state, install dependencies,
 read unrelated user files, or modify business source, tests, specifications, or
 scheduler state. Before a command can compile, package, or populate a cache,
 copy the required project snapshot into
-`<attempt>/workspace/` and put every build/cache directory below that attempt.
+`<attempt>/workspace/`, excluding `.git/`, `fm_agent/` and `fm_agent_skill/`,
+and put every build/cache directory below that attempt. Extracted fragments
+are analysis artifacts, not compilable project source.
 Never use or create a project-root `build/`, `target/`, `node_modules/`,
 `.gradle/`, or equivalent shared output. Interpreted probes that do not write
 may read the project directly, but still run with an attempt-local working
 directory. Do not claim a command ran unless its observed output is recorded.
+Record setup/build commands first and the actual probe command last. Only the
+last command's stdout supplies the probe's exact first-line marker; any nonzero
+command exit remains an execution failure.
 
 For ArkTS, the snapshot marker may report `arkts_dependencies.status` as
 `hydrated`. In that case, copy the snapshot's lock-bound `oh_modules/` trees
@@ -165,7 +173,10 @@ Use only the recorded execution classification:
   `confirmation_status` to `confirmed`.
 - `not_reproduced`: execution completed without reproducing; before
   the final negative index set `confirmation_status` to `inconclusive`; on the
-  final negative index set it to `rejected`.
+  final negative index set it to `rejected` only when every retained attempt
+  completed as `not_reproduced`. If any retained attempt is inconclusive or
+  unsupported, keep `confirmation_status: inconclusive` and retain its reason;
+  the retry budget ending does not supply the missing execution.
 - `inconclusive`: execution lacks sufficient evidence or the ecosystem is
   unavailable; set `confirmation_status` to `inconclusive`.
 

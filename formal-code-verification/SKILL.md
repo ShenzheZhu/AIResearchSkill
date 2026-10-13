@@ -35,6 +35,8 @@ reproduce counterexamples and maintain coverage evidence.
 
 The method follows `{P} C {Q}`: derive intended P/Q independently, propagate assertions through the implementation to obtain actual A, and seek a concrete `P ∧ A ∧ ¬Q` witness. Keep callee dependency risks separate from direct violations. Every direct candidate goes through real-code Bug Validation before being reported as confirmed.
 
+This workflow is project independent. Check the actual extraction/execution capabilities of the target environment; a language profile, supplied source span or passing example does not establish compatibility for another language, flow or repository. Preserve missing parsers, unsupported source forms and unavailable integration/verifier environments as gaps. Every qualified coverage row must refer to the exact requirement and execution it actually checks.
+
 The runtime keeps local analysis artifacts and continuation state; it does not modify product source or introduce product execution routing. Its LLM reasoning is not a sound machine-checked proof. Report the selected scope, normative assumptions, actual dynamic results and uncovered boundaries.
 
 For a repeatable public-repository example, read [references/public-case.md](references/public-case.md). For source provenance and packaging changes, read [UPSTREAM.md](UPSTREAM.md).

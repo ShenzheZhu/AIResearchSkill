@@ -126,12 +126,16 @@ def _codegraph_spans(target: Path, export_path: Path | None) -> dict[str, list[t
 def extract(target: Path, submodules: list[str], codegraph_export: Path | None = None) -> dict:
     root = state.fm_dir(target) / "extracted_functions"
     if root.exists(): shutil.rmtree(root)
+    for path in (state.fm_dir(target) / "extraction_manifest.json", state.fm_dir(target) / "fm_agent_file_list.json", state.control_dir(target) / "analysis_index.json"):
+        path.unlink(missing_ok=True)
     manifest = []
     codegraph = _codegraph_spans(target, codegraph_export)
     provenance: dict[str, str] = {}
     for source in _sources(target, submodules):
         rel = source.relative_to(target).as_posix()
         functions, origin = function_spans(source, codegraph.get(rel))
+        if origin == "parse-error":
+            raise ValueError(f"Source parsing failed: {rel}")
         provenance[rel] = origin
         lines = source.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
         counts = {name: sum(1 for candidate, _, _ in functions if candidate == name) for name, _, _ in functions}

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by AIResearchSkill: terminate failed DAGs after independent ready/live work drains.
 """Bounded, event-driven Coordinator actions over the durable DAG."""
 from __future__ import annotations
 
@@ -102,7 +103,14 @@ def next_actions(target: Path, limit: int, offset: int = 0, turn_budget_remainin
         *[_claim_descriptor(job) for job in selected],
     ]
     aggregate = scheduler.aggregate(target)
-    action = "dispatch" if actions else "wait_for_completion_event" if aggregate["pending"] else "dag_converged"
+    failed = any(group["status"] == "failed" for group in aggregate["groups"])
+    running = any(group["status"] == "running" for group in aggregate["groups"])
+    if actions:
+        action = "dispatch"
+    elif failed and not running:
+        action = "phase_failed"
+    else:
+        action = "wait_for_completion_event" if aggregate["pending"] else "dag_converged"
     return {
         "action": action,
         "dispatches": actions,
@@ -112,16 +120,22 @@ def next_actions(target: Path, limit: int, offset: int = 0, turn_budget_remainin
         "scheduler": aggregate,
         "coordinator": {
             **coordinator_contract.invocation(host),
-            "continuation_required": action != "dag_converged",
+            "continuation_required": action not in {"dag_converged", "phase_failed"},
             "next_step": (
                 "claim one returned candidate or finalization pass, launch its Worker immediately, then repeat until every returned descriptor is claimed"
                 if action == "dispatch" else
                 "wait only for an already-running Worker receipt, then call next"
                 if action == "wait_for_completion_event" else
+                "record pipeline failure; the durable DAG has failed jobs and no ready or running Worker"
+                if action == "phase_failed" else
                 "join the current phase through its receipt and gate; this is not terminal analysis completion"
             ),
         },
-        "continuation": "claim and launch each returned candidate immediately; submit each completion, then call next again to fill the free slot",
+        "continuation": (
+            "record pipeline failure; no live Worker can complete the failed DAG"
+            if action == "phase_failed" else
+            "claim and launch each returned candidate immediately; submit each completion, then call next again to fill the free slot"
+        ),
     }
 
 

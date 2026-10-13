@@ -62,6 +62,23 @@ class AgentExecutionEvidenceTest(unittest.TestCase):
             with self.subTest(classification=classification):
                 self.assertTrue(self.valid(commands=[self.command("build succeeded\n", command="make"), self.command(marker + "\n")], classification=classification))
 
+    def test_setup_output_cannot_supply_or_override_the_probe_outcome(self) -> None:
+        for setup_marker in ("CONFIRMED", "NOT CONFIRMED"):
+            with self.subTest(setup_marker=setup_marker):
+                setup = self.command(setup_marker + "\n", command="existing-verifier")
+                self.assertFalse(self.valid(commands=[setup, self.command("probe omitted its marker\n")], classification="confirmed"))
+                self.assertTrue(self.valid(commands=[setup, self.command("probe omitted its marker\n")], classification="inconclusive"))
+                for marker, classification in (("CONFIRMED", "confirmed"), ("NOT CONFIRMED", "not_reproduced")):
+                    self.assertTrue(self.valid(commands=[setup, self.command(marker + "\n")], classification=classification))
+
+    def test_probe_requires_one_exact_first_line_marker(self) -> None:
+        for output in ("diagnostic\nCONFIRMED\n", "CONFIRMED tool success\n", "NOT CONFIRMED tool success\n", "\nCONFIRMED\n", "CONFIRMED\nCONFIRMED\n"):
+            with self.subTest(output=output):
+                self.assertFalse(self.valid(commands=[self.command(output)], classification="confirmed"))
+                self.assertFalse(self.valid(commands=[self.command(output)], classification="not_reproduced"))
+                self.assertTrue(self.valid(commands=[self.command(output)], classification="inconclusive"))
+        self.assertTrue(self.valid(commands=[self.command("CONFIRMED\nobserved balance: 2\n")], classification="confirmed"))
+
     def test_recorded_runtime_error_and_inconclusive_evidence_remain_valid(self) -> None:
         self.assertTrue(self.valid(commands=[self.command("CONFIRMED\n", 1)], classification="runtime_error", result_state="execution_error"))
         self.assertTrue(self.valid(commands=[self.command("output without a required marker\n")], classification="inconclusive"))

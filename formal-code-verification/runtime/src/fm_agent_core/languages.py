@@ -1,3 +1,4 @@
+# Modified by AIResearchSkill: surface parser gaps and preserve named callable/TSX coverage.
 """Single source of truth for FM-Agent Skill language capabilities.
 
 The Skill intentionally does not import FM-Agent.  This module mirrors only a
@@ -147,8 +148,22 @@ def probe_adapter_choices() -> tuple[str, ...]:
 
 def _python_spans(path: Path) -> list[tuple[str, int, int]]:
     tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-    return [(node.name, node.lineno, getattr(node, "end_lineno", node.lineno))
-            for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    found, covered = [], set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found.append((node.name, node.lineno, node.end_lineno)); covered.add(node)
+        elif isinstance(node, ast.Lambda):
+            parent = parents.get(node)
+            targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target] if isinstance(parent, ast.AnnAssign) else []
+            if len(targets) == 1 and isinstance(targets[0], ast.Name) and parent.value is node:
+                found.append((targets[0].id, parent.lineno, parent.end_lineno)); covered.add(node)
+                continue
+            while parent is not None and (parent not in covered or node.lineno < parent.lineno):
+                parent = parents.get(parent)
+            if parent is None:
+                raise ValueError(f"Unsupported unbound callable in {path}:{node.lineno}")
+    return sorted(set(found), key=lambda item: (item[1], item[2], item[0]))
 
 
 def _tree_sitter_spans(path: Path, profile: LanguageProfile) -> list[tuple[str, int, int]] | None:
@@ -158,7 +173,8 @@ def _tree_sitter_spans(path: Path, profile: LanguageProfile) -> list[tuple[str, 
     except ImportError:
         get_parser = None
     parser = None
-    for name in profile.treesitter_languages:
+    grammars = ("tsx",) if path.suffix.lower() == ".tsx" else profile.treesitter_languages
+    for name in grammars:
         if get_parser is not None:
             try:
                 parser = get_parser(name); break
@@ -179,6 +195,8 @@ def _tree_sitter_spans(path: Path, profile: LanguageProfile) -> list[tuple[str, 
             parser = None
     if parser is None: return None
     source = path.read_bytes(); tree = parser.parse(source); found = []
+    if tree.root_node.has_error:
+        raise SyntaxError(f"Tree-sitter could not parse {path}")
     node_types = {"function_definition", "function_declaration", "function_item", "method_definition", "method_declaration", "generator_function_declaration"}
 
     def declaration_span(node):
@@ -191,6 +209,7 @@ def _tree_sitter_spans(path: Path, profile: LanguageProfile) -> list[tuple[str, 
             span, parent = parent, parent.parent
         return span
 
+    covered = set()
     stack = [tree.root_node]
     while stack:
         node = stack.pop(); stack.extend(reversed(node.children))
@@ -198,16 +217,43 @@ def _tree_sitter_spans(path: Path, profile: LanguageProfile) -> list[tuple[str, 
         if node.type == "variable_declarator":
             value = node.child_by_field_name("value")
             name_node = node.child_by_field_name("name")
-            if value is None or value.type != "arrow_function":
+            if value is None or value.type not in {"arrow_function", "function_expression", "generator_function"}:
                 continue
+            if name_node is None or name_node.type != "identifier":
+                raise ValueError(f"Unsupported callable binding in {path}:{node.start_point[0] + 1}")
             span = declaration_span(node)
+        elif node.type == "var_spec":
+            value = node.child_by_field_name("value")
+            values = [child for child in value.named_children if child.type != "comment"] if value is not None else []
+            if not any(child.type == "func_literal" for child in values):
+                continue
+            names = [child for child in node.named_children if child.type == "identifier"]
+            if len(names) != 1 or len(values) != 1:
+                raise ValueError(f"Unsupported Go callable binding in {path}:{node.start_point[0] + 1}")
+            name_node = names[0]
+        elif node.type == "assignment":
+            value = node.child_by_field_name("right")
+            name_node = node.child_by_field_name("left")
+            if value is None or value.type != "lambda" or name_node is None or name_node.type != "identifier" or (node.parent is not None and node.parent.type == "assignment"):
+                continue
         elif node.type in node_types:
             name_node = node.child_by_field_name("name")
+        elif node.type in {"arrow_function", "function_expression", "generator_function", "func_literal", "lambda"}:
+            parent = node.parent
+            while parent is not None and (parent.start_byte, parent.end_byte) not in covered:
+                parent = parent.parent
+            if parent is None:
+                raise ValueError(f"Unsupported unbound callable in {path}:{node.start_point[0] + 1}")
+            continue
         else:
             continue
-        if name_node is None: continue
+        if name_node is None:
+            raise ValueError(f"Unsupported callable declaration without a name in {path}:{node.start_point[0] + 1}")
         name = source[name_node.start_byte:name_node.end_byte].decode("utf-8", "replace")
-        if re.fullmatch(r"[A-Za-z_$][\w$]*", name): found.append((name, span.start_point[0] + 1, span.end_point[0] + 1))
+        if not name.replace("$", "_").isidentifier():
+            raise ValueError(f"Unsupported callable name in {path}:{node.start_point[0] + 1}")
+        found.append((name, span.start_point[0] + 1, span.end_point[0] + 1))
+        covered.add((node.start_byte, node.end_byte))
     return sorted(set(found), key=lambda item: (item[1], item[2], item[0]))
 
 
@@ -349,7 +395,7 @@ def _arkts_brace_spans(path: Path) -> list[tuple[str, int, int]]:
 
 
 def _clang_ast_spans(path: Path, profile: LanguageProfile) -> list[tuple[str, int, int]] | None:
-    """Use Clang's JSON AST only for C-family profiles when Tree-sitter lacks a grammar."""
+    """Use Clang's JSON AST for C-family profiles when Tree-sitter cannot extract them."""
     if profile.key not in {"c", "cpp"}:
         return None
     compiler = shutil.which("clang" if profile.key == "c" else "clang++")
@@ -431,7 +477,14 @@ def function_spans(path: Path, codegraph_spans: Iterable[tuple[str, int, int]] |
         if spans: return spans, "codegraph"
     if profile.span_extractor == "arkts-brace":
         return _arkts_brace_spans(path), "arkts-brace"
-    parsed = _tree_sitter_spans(path, profile)
+    try:
+        parsed = _tree_sitter_spans(path, profile)
+    except SyntaxError:
+        return [], "parse-error"
+    except ValueError:
+        parsed = _clang_ast_spans(path, profile)
+        if parsed is not None: return parsed, "clang-ast"
+        raise
     if parsed is not None: return parsed, "tree-sitter"
     parsed = _clang_ast_spans(path, profile)
     if parsed is not None: return parsed, "clang-ast"
