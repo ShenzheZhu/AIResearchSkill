@@ -1,6 +1,6 @@
 # Host-native Coordinator
 
-Modified by AIResearchSkill: require fresh native Worker contexts.
+Modified by AIResearchSkill: isolate native Workers and allow validated same-attempt Bug continuation.
 
 The current Claude Code or Codex **parent Agent** is the only FM-Agent
 Coordinator. It is not a Worker and must stay active until the durable DAG
@@ -14,7 +14,13 @@ converges or the host forcibly ends the turn.
    host's native subagent mechanism: Claude uses `registered_worker`; Codex
    uses the ticket's `native_launch_tool`, normally
    `collaboration.spawn_agent`, with one unique task name per job and
-   `native_launch_arguments` (`fork_turns="none"`). Pass only the complete
+   `native_launch_arguments` (`fork_turns="none"`). Spec and Verify always
+   start independently. A Bug execution ticket with `candidate_continuation`
+   may use `native_followup_tool` (`collaboration.followup_task`) on its exact
+   preparation Worker only after preparation validation. Require the same
+   project, job, candidate, attempt and input hash, and no unrelated messages,
+   tests or answer keys in that context. If that context or tool is unavailable,
+   use the ticket's fresh launch path. Pass only the complete
    ticket, immutable definition and its permitted evidence. Launch returned
    tickets up to the host's available slots. The absence of a named Worker
    registry does **not** mean Codex has no subagent capability. If no fresh

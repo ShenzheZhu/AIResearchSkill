@@ -5,7 +5,7 @@ description: Run or safely resume an FM-Agent full, incremental, or no-op correc
 
 # FM-Agent analysis
 
-Modified by AIResearchSkill: Codex semantic Workers require fresh, non-inherited contexts.
+Modified by AIResearchSkill: isolate semantic Workers and continue only validated same-attempt Bug execution.
 
 This is the sole public analysis entry point. Execute it directly in Claude
 Code or Codex using that host's worker/subagent capability. Never launch,
@@ -351,6 +351,9 @@ knowledge inputs deterministically:
 
 If this rejects a changed or missing knowledge file, fail the phase. Workers
 may cite user requirements only through the resulting manifest-bound copies.
+Verify and Bug preparation tickets include these copied requirements and permitted
+caller evidence. An invalid or unclear witness domain is a named gap; never
+invent a negative output, substitute an unrelated witness or weaken Q.
 
 On resume, if a prior Phase Plan Worker was accepted by an older Skill version
 but its `phases.json` does not satisfy the current schema, the pipeline
@@ -414,7 +417,16 @@ write paths, and a `host_invocation` object. Claude
 uses `registered_worker`; Codex uses `generic_subagent` through the exact
 `host_invocation.native_launch_tool`—normally
 `collaboration.spawn_agent`—and passes its fixed `developer_instruction`
-unchanged, with `native_launch_arguments` (`fork_turns="none"`). Supply only the ticket, immutable definition and permitted evidence; never inherit parent history or test answers. For Codex, use a distinct task name derived from each `job_id`,
+unchanged, with `native_launch_arguments` (`fork_turns="none"`). Spec and Verify
+always start independently. Only a returned Bug execution ticket may use
+`host_invocation.native_followup_tool` (`collaboration.followup_task`) on its
+matching isolated preparation Worker after validated preparation. Check the
+identical project/job/candidate/attempt/input hash and that the context received
+no parent history, tests, answers or unrelated task messages. If the matching
+context or followup tool is unavailable, use the fresh launch metadata. Supply
+only the complete ticket, immutable definition and permitted evidence; never
+reuse another job, candidate or attempt. For Codex, use a distinct task name
+derived from each `job_id`,
 claim it, then launch its returned ticket in parallel. The lack of a named-plugin Worker
 registry is not evidence that native subagents are unavailable. Never paste
 or paraphrase the contract, ask an Agent to read the job plan, generate a
@@ -501,15 +513,21 @@ fields, malformed JSON, or invalid callee entries require another Agent call.
 Never restart all specification
 jobs because one batch failed. A verification-level failure is a valid `ERROR` result, not a retry;
 retry only when the Agent or result artifact itself failed. In default
-`agent-executed` mode, a Bug Validator job uses Worker preparation, execution,
-and finalization passes; optional `adapter` mode uses the Coordinator-owned
-dynamic runner between preparation and finalization. Up to four Bug Validator
+`agent-executed` mode, a Bug Validator job uses preparation and execution passes;
+optional `adapter` mode uses the Coordinator-owned dynamic runner after
+preparation. Reports and canonical receipts are generated locally from validated
+immutable execution and accepted history. Up to four Bug Validator
 jobs may run concurrently, but each uses only its own attempt-local workspace
 and cache. Its runtime failures retry up to five attempts by default. A
-completed `not_reproduced` or `inconclusive` result is not a runtime failure:
+completed `not_reproduced` or ambiguous `inconclusive` result is not a runtime
+failure:
 requeue its same job immediately until it has three completed negative probes
-by default, preserving each probe in the result's `attempts` array. A
-`confirmed` result finishes immediately. Every new Bug Validator job must
+by default, preserving each probe in the result's `attempts` array. Use a distinct
+lawful witness/trigger within the candidate claim for a retry or fix the actual
+execution error. Exact-input claims remain limited to that input and schedule.
+Valid unsupported evidence finishes inconclusive on its first attempt; repeating
+an identical missing-runtime probe adds no evidence. A `confirmed` result finishes
+immediately. Every new Bug Validator job must
 assign exactly one `fm_agent/bug_validation/*.result.json` required output;
 each completion appends the current attempt with the receipt classification.
 `input`, `semantic`, and `cancelled`
@@ -582,7 +600,7 @@ does. Run `probe_runner.py detect` only when configuration explicitly selects
 `bug_validation_execution: adapter`.
 
 For every Bug Validator job, use the host-coordinated deterministic state
-machine; do not manually sequence its preparation, runner, finalization, or
+machine; do not manually sequence its preparation, execution, report, or
 summary scripts. A manifest must include `input.bug_id` and `input.mode`.
 Semantic phases are strictly ordered: do not plan or start Verification until
 the Specification gate succeeds, and do not plan or start Bug Validation until
@@ -597,9 +615,10 @@ Worker; do not let it reconstruct them from a prior attempt. After preparation,
 call `next`. In default `agent-executed` mode, process the returned `execution`
 Worker pass, then call `submit-agent-execution`; the Worker must have written
 its immutable `reproduction_result.json`. In optional `adapter` mode,
-`run_dynamic` instead requires `run-dynamic`. After finalization, call
-`submit-finalization`; it derives the authoritative scheduler receipt from the
-assigned final report and immutable reproduction evidence. Process one
+`run_dynamic` instead requires `run-dynamic`. The executor validates the immutable
+execution and accepted history, generates the assigned report, and submits the
+canonical scheduler receipt locally. It does not request another Worker.
+Process one
 returned action at a time: a report path alone is never evidence that an
 attempt finished. Runtime errors requeue through the same state machine;
 terminal phase summaries are written by it after all Bug Validator jobs finish.
@@ -608,6 +627,11 @@ FM-Agent compatibility model. Up to four Bug Validator jobs run concurrently by
 default; each Worker must use only its assigned attempt-local workspace and
 cache, never a project-root build output. `build_result.json` can never confirm or reject a defect. Read
 [bug-validation.md](../../references/bug-validation.md) for the full contract.
+
+Expected lifecycle counts fall from three to two model turns per attempt and
+from three to one native context starts when safe continuation is available
+(otherwise two). These counts provide no measured wall-clock guarantee and do not establish
+completion of any repository audit.
 
 ## Automatic Bug Validation
 
@@ -637,7 +661,7 @@ multiple attempts:
 1. Call `durable_executor.py next --limit 1`, claim the returned descriptor,
    launch its Worker pass, and submit the receipt.
 2. Advance through exactly the returned executor action — `host_worker`,
-   `wait_for_completion_event`, `wait_for_finalization_capacity`, `submit_agent_execution`, or
+   `wait_for_completion_event`, `submit_agent_execution`, or
    `scheduler_retry` — and immediately call `next` again.
 3. Continue until the executor returns `dag_converged` for that job or an
    explicit exhausted-job failure.
@@ -646,8 +670,8 @@ multiple attempts:
    full-analysis `pipeline.py complete` or a full-scope Bug Validation gate for
    this targeted publication.
 
-A single-function validation with at most 5 runtime attempts × 3 negative
-probes is bounded enough to complete in one turn.  If the host reaches a
+A single-function validation retains the bounded runtime and completed-negative
+budgets. If the host reaches a
 context or tool-call limit mid-validation, checkpoint the durable state and
 let the next ordinary run or explicit `--resume` continue that exact job id
 and attempt.
@@ -659,7 +683,7 @@ non-terminal executor response as a continuation request. This applies to
 specification, verification, and Bug Validation (including legacy batched and
 `--validate` jobs):
 
-- `host_worker`, `wait_for_completion_event`, `wait_for_finalization_capacity`, `scheduler_retry`, and
+- `host_worker`, `wait_for_completion_event`, `scheduler_retry`, and
   `submit_agent_execution` are **not** terminal responses;
 - a report file, a confirmed subset, or a static `inconclusive` explanation is
   not evidence that a job finished;
@@ -688,14 +712,12 @@ the exact next action and tell the user how to resume it.
 When Bug Validation is active, remain in this loop:
 
 1. Call `durable_executor.py next`, claim and launch every returned descriptor
-   (`claim_worker` or `claim_finalization`), and wait for every launched Worker
+   (`claim_worker`), and wait for every launched Worker
    receipt.
 2. Advance each job through exactly the returned executor action, submit its
    receipt, and immediately call `next` to fill each available slot.
-3. If it returns `wait_for_completion_event`, wait for an existing Worker.
-   If it returns `wait_for_finalization_capacity`, continue claiming primary
-   candidates and call `next` after any completion; it will re-offer the
-   unleased finalize pass. Do not issue another analysis report.
+3. If it returns `wait_for_completion_event`, wait for an existing Worker and
+   call `next` after its completion. Do not issue another analysis report.
 4. Only on `dag_converged`, write `scheduler.py phase-receipt --phase
    bug_validation`; call `pipeline.py phase-complete` when `gate_ready`.
 5. If a Worker lacks a usable toolchain, it must still complete its own job

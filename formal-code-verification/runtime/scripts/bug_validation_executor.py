@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Modified by AIResearchSkill: issue complete bounded Worker tickets and validate durable command evidence.
+# Modified by AIResearchSkill: finalize accepted execution evidence without another Worker.
 """Deterministic Bug Validator state machine for a Codex/Claude Coordinator.
 
 This script never starts an LLM, imports FM-Agent, or executes an Agent-provided
 command.  It exposes exactly the next host-worker request and owns local
 admission, evidence identity checks, retries, and the terminal summary.  In
 the default ``agent-executed`` mode, the Coordinator invokes the Worker for
-preparation, project-scoped execution, and finalization; ``adapter`` retains
-the controlled local-runner path.
+preparation and project-scoped execution. Reports and receipts are written
+locally from that execution evidence; ``adapter`` retains the controlled
+local-runner path.
 """
 from __future__ import annotations
 
@@ -110,6 +111,8 @@ def execution_mode(target: Path) -> str:
 
 
 def worker_request(target: Path, job: dict, pass_name: str, host: str = "auto") -> dict:
+    if pass_name not in {"preparation", "execution"}:
+        raise ValueError(f"unsupported Bug Validator Worker pass: {pass_name}")
     bug_id, mode = context(job)
     attempt = int(job.get("attempts", 0))
     if attempt < 1:
@@ -130,7 +133,8 @@ def worker_request(target: Path, job: dict, pass_name: str, host: str = "auto") 
     if pass_name == "preparation":
         if not isinstance(item, dict) or not all(isinstance(item.get(key), str) for key in ("path", "artifact", "language")):
             raise ValueError("Bug Validator preparation requires its current source-index entry")
-        from semantic_executor import _related_artifacts
+        from semantic_executor import _related_artifacts, normative_read_paths
+        reads.update(normative_read_paths(target))
         assigned = {item["artifact"]} | _related_artifacts(target, [item["artifact"]])
         for entry in index["functions"]:
             if not isinstance(entry, dict) or entry.get("artifact") not in assigned:
@@ -150,44 +154,36 @@ def worker_request(target: Path, job: dict, pass_name: str, host: str = "auto") 
         _, approved = read_contract(target, bug_id, attempt, execution)
         language, public_entrypoint = approved["language"], approved["public_entrypoint"]
         reads.update({f"{root}/reproduction.json", f"{root}/{approved['probe_file']}"})
-        if pass_name == "execution":
-            public_path = target / public_entrypoint["target"]
-            source_root = public_path.parent if public_path.is_file() else public_path
-            reads.update(path.relative_to(target).as_posix() for path in state.source_files(target, [source_root.relative_to(target).as_posix()]))
-        elif pass_name == "finalization":
-            result_path = f"{root}/reproduction_result.json"
-            if not (target / result_path).is_file():
-                raise ValueError("Bug Validator finalization requires its recorded execution result")
-            reads.update({result_path, job["bug_result_path"]})
-        else:
-            raise ValueError(f"unsupported Bug Validator Worker pass: {pass_name}")
+        public_path = target / public_entrypoint["target"]
+        source_root = public_path.parent if public_path.is_file() else public_path
+        reads.update(path.relative_to(target).as_posix() for path in state.source_files(target, [source_root.relative_to(target).as_posix()]))
     profile = profile_for_key(language)
     if profile is None or profile.probe_extension is None:
         raise ValueError(f"Bug Validator ticket has unsupported language: {language}")
-    if pass_name != "finalization":
-        metadata_roots = {target, (target / item["path"]).parent} if pass_name == "preparation" else {target, source_root}
-        if pass_name == "preparation":
-            for directory in tuple(metadata_roots):
-                reads.update((directory / name).relative_to(target).as_posix() for name in ("README", "README.md", "README.rst", "README.txt"))
-            for initializer in state.source_files(target):
-                if initializer.name == "__init__.py":
-                    reads.add(initializer.relative_to(target).as_posix())
-                    metadata_roots.update(parent for parent in initializer.parents if parent == target or target in parent.parents)
-        for directory in metadata_roots:
-            reads.update((directory / name).relative_to(target).as_posix() for name in (*profile.build_detectors, "Makefile", "makefile", "GNUmakefile"))
+    metadata_roots = {target, (target / item["path"]).parent} if pass_name == "preparation" else {target, source_root}
+    if pass_name == "preparation":
+        for directory in tuple(metadata_roots):
+            reads.update((directory / name).relative_to(target).as_posix() for name in ("README", "README.md", "README.rst", "README.txt"))
+        for initializer in state.source_files(target):
+            if initializer.name == "__init__.py":
+                reads.add(initializer.relative_to(target).as_posix())
+                metadata_roots.update(parent for parent in initializer.parents if parent == target or target in parent.parents)
+    for directory in metadata_roots:
+        reads.update((directory / name).relative_to(target).as_posix() for name in (*profile.build_detectors, "Makefile", "makefile", "GNUmakefile"))
     outputs = {
         "preparation": [f"{root}/reproduction.json", f"{root}/probe{profile.probe_extension}"],
         "execution": [f"{root}/reproduction_result.json"],
-        "finalization": list(job["required_outputs"]),
     }[pass_name]
     writes = list(outputs)
     if pass_name == "execution":
         writes.append(f"{root}/workspace/")
-    elif pass_name == "finalization":
-        detail = job["bug_result_path"].removesuffix(".result.json") + ".md"
-        if detail not in writes:
-            writes.append(detail)
-    invocation = worker_contracts.invocation("fm-agent-skill:fm-bug-validate-worker", host)
+    invocation = worker_contracts.invocation(
+        "fm-agent-skill:fm-bug-validate-worker", host,
+        **({"candidate_continuation": {
+            "project": str(target.resolve()), "job_id": job["id"], "attempt": attempt,
+            "candidate_id": candidate_id, "input_hash": job["input_hash"],
+        }} if pass_name == "execution" else {}),
+    )
     ticket = {
         "schema_version": 2,
         "action": "host_worker",
@@ -232,7 +228,7 @@ def worker_request(target: Path, job: dict, pass_name: str, host: str = "auto") 
 
 
 def agent_execution_result_valid(target: Path, job: dict, *, snapshot_commit: str | None = None) -> bool:
-    """Validate identity and outcome before a fast-mode Worker may finalize."""
+    """Validate identity and outcome before execution evidence is accepted."""
     bug_id, _ = context(job); attempt = int(job["attempts"])
     snapshot_commit = snapshot_commit or state.current_snapshot_commit(target)
     _, contract = read_contract(target, bug_id, attempt, "agent-executed", snapshot_commit=snapshot_commit)
@@ -352,22 +348,6 @@ def finalization_matches_current_attempt(target: Path, job: dict) -> bool:
     return isinstance(evidence, dict) and evidence.get("reproduction_result") == expected.relative_to(target).as_posix()
 
 
-def request_finalization(target: Path, job: dict, host: str = "auto") -> dict:
-    """Queue finalization separately after releasing the probe execution slot."""
-    job = scheduler.mark_bug_validation_ready_to_finalize(target, job["id"])
-    try:
-        job = scheduler.claim_bug_validation_finalization(target, job["id"])
-    except ValueError as exc:
-        if "finalization capacity reached" not in str(exc) and "global subagent capacity reached" not in str(exc):
-            raise
-        return {
-            "action": "wait_for_finalization_capacity",
-            "job_id": job["id"],
-            "rule": "Do not consume a primary Bug Validation slot while waiting for finalization capacity.",
-        }
-    return worker_request(target, job, "finalization", host)
-
-
 def next_action(target: Path, job_id: str, host: str = "auto") -> dict:
     job = load_job(target, job_id)
     if job["status"] == "queued":
@@ -391,9 +371,7 @@ def next_action(target: Path, job_id: str, host: str = "auto") -> dict:
         if not agent_execution_result_valid(target, job):
             raise ValueError("agent-executed reproduction result is missing required identity or outcome evidence")
         return {"action": "submit_agent_execution", "job_id": job_id}
-    if not finalization_matches_current_attempt(target, job):
-        return request_finalization(target, job, host)
-    return {"action": "submit_finalization_receipt", "job_id": job_id, "result_path": job["bug_result_path"]}
+    return submit_finalization(target, job_id)
 
 
 def start(target: Path, job_id: str) -> dict:
@@ -438,6 +416,8 @@ def run_dynamic(target: Path, job_id: str) -> dict:
 def submit_agent_execution(target: Path, job_id: str) -> dict:
     """Accept immutable Worker evidence and preserve normal retry semantics."""
     job = load_job(target, job_id)
+    if job["status"] == "succeeded":
+        return submit_finalization(target, job_id)
     if job["status"] != "running" or execution_mode(target) != "agent-executed":
         raise ValueError("submit-agent-execution requires a running agent-executed Bug Validator job")
     if not agent_execution_result_valid(target, job):
@@ -450,9 +430,7 @@ def submit_agent_execution(target: Path, job_id: str) -> dict:
             scheduler.transition(target, job_id, "retry", None, None, "execution")
             return next_action(target, job_id)
         return {"action": "terminal", "job_id": job_id, "status": failed.get("status")}
-    if not finalization_matches_current_attempt(target, job):
-        return request_finalization(target, job)
-    return {"action": "submit_finalization_receipt", "job_id": job_id, "result_path": job["bug_result_path"]}
+    return submit_finalization(target, job_id)
 
 
 def all_phase_jobs_succeeded(target: Path, phase: str) -> bool:
@@ -466,13 +444,7 @@ def all_phase_jobs_succeeded(target: Path, phase: str) -> bool:
 
 
 def canonical_finalization_receipt(target: Path, job: dict) -> dict:
-    """Build the scheduler receipt from the immutable final Worker output.
-
-    A Bug Validator's semantic conclusion lives in its assigned report, not in
-    a Coordinator-transcribed summary.  Deriving this tiny receipt prevents a
-    host from turning an otherwise valid confirmed result into an output retry
-    merely by omitting (or mistyping) ``classification``.
-    """
+    """Derive the scheduler receipt from the recorded current classification."""
     report = state.read_json(target / job["bug_result_path"], {})
     attempts = report.get("attempts") if isinstance(report, dict) else None
     latest = attempts[-1] if isinstance(attempts, list) and attempts else None
@@ -487,32 +459,80 @@ def canonical_finalization_receipt(target: Path, job: dict) -> dict:
     }
 
 
-def submit_finalization(target: Path, job_id: str, receipt: dict | None = None) -> dict:
+def write_finalization(target: Path, job: dict) -> None:
+    """Render the assigned candidate and validated execution without judgment."""
+    bug_id, _ = context(job); attempt = int(job["attempts"])
+    if not execution_result_valid(target, job):
+        raise ValueError("dynamic reproduction is missing required identity or outcome evidence")
+    root = attempt_dir(target, bug_id, attempt)
+    result_path = root / "reproduction_result.json"
+    result = state.read_json(result_path, {})
+    if result["state"] == "execution_error":
+        raise ValueError(result["reason"])
+    candidate = state.direct_candidates(target).get(job["input"]["candidate_id"])
+    if candidate is None or candidate["function_id"] != job["input"]["function_id"]:
+        raise ValueError("Bug Validator report requires its assigned validated direct candidate")
+    accepted_attempt_read_paths(target, job)
+    attempts = [*job.get("validated_attempts", []), {
+        "ordinal": attempt, "classification": result["classification"],
+        "dynamic_evidence": {"reproduction_result": result_path.relative_to(target).as_posix()},
+    }]
+    status = "inconclusive"
+    if result["classification"] == "confirmed":
+        status = "confirmed"
+    elif result["classification"] == "not_reproduced" and len(attempts) >= int(job["negative_max_attempts"]) and all(recorded["classification"] == "not_reproduced" for recorded in attempts):
+        status = "rejected"
+    report = {
+        "schema_version": 2, "bug_id": bug_id,
+        "candidate_id": job["input"]["candidate_id"], "function_id": job["input"]["function_id"],
+        "snapshot_commit": result["snapshot_commit"], "confirmation_status": status,
+        "candidate_reasoning": candidate["reasoning"], "attempts": attempts,
+    }
+    lines = [
+        f"# Bug Validation: {report['candidate_id']}", "",
+        f"Function: `{report['function_id']}`", f"Status: `{status}`", "",
+        "## Assigned candidate witness (static reasoning)", "",
+        "The assigned witness is not a record of the input used by execution.", "",
+        "```json", json.dumps(candidate["reasoning"], ensure_ascii=False, indent=2), "```", "",
+        "## Recorded execution evidence", "",
+    ]
+    for recorded in attempts:
+        relative = recorded["dynamic_evidence"]["reproduction_result"]
+        lines.extend([
+            f"### Attempt {recorded['ordinal']}: {recorded['classification']}", "",
+            f"Evidence: `{relative}`", "", "```json",
+            (target / relative).read_text(encoding="utf-8").rstrip("\n"), "```", "",
+        ])
+    state.atomic_json(target / job["bug_result_path"], report)
+    detail = target / (job["bug_result_path"].removesuffix(".result.json") + ".md")
+    detail.write_text("\n".join(lines), encoding="utf-8")
+
+
+def submit_finalization(target: Path, job_id: str) -> dict:
+    """Write and submit locally, or verify an identical accepted submission."""
     job = load_job(target, job_id); _, mode = context(job)
-    if not finalization_matches_current_attempt(target, job):
-        # Do not leave a leased job running when a Worker wrote a static
-        # report without the required immutable dynamic evidence.  Treat this
-        # as an execution/protocol failure and requeue through the normal
-        # bounded retry path; a report path alone is never a completion.
+    if job["status"] not in {"running", "succeeded"}:
+        raise ValueError("local finalization requires a running or succeeded Bug Validator job")
+    try:
+        if job["status"] == "running":
+            write_finalization(target, job)
+    except ValueError as exc:
         failed = scheduler.transition(
             target, job_id, "fail", None,
-            "no dynamic reproduction available",
+            str(exc),
             "execution",
         )
         if failed.get("status") == "retryable":
             scheduler.transition(target, job_id, "retry", None, None, "execution")
             return next_action(target, job_id)
         return {"action": "terminal", "job_id": job_id, "status": failed.get("status"), "reason": failed.get("message")}
-    # Do not trust a host-transcribed finalization receipt.  The Scheduler
-    # validates this canonical receipt against the report and its immutable
-    # reproduction evidence before accepting it.
     canonical_receipt = canonical_finalization_receipt(target, job)
     completed = scheduler.transition(target, job_id, "complete", canonical_receipt, None, "execution")
     if completed.get("status") == "retryable":
         scheduler.transition(target, job_id, "retry", None, None, "execution")
         return next_action(target, job_id)
     response = next_action(target, job_id)
-    if completed.get("status") == "succeeded" and all_phase_jobs_succeeded(target, completed["phase"]) and not state.active_record(target).get("validation_scope"):
+    if job["status"] == "running" and completed.get("status") == "succeeded" and all_phase_jobs_succeeded(target, completed["phase"]) and not state.active_record(target).get("validation_scope"):
         response["summary"] = write_summary(target, mode)
     return response
 
@@ -520,7 +540,7 @@ def submit_finalization(target: Path, job_id: str, receipt: dict | None = None) 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Advance one host-coordinated FM-Agent Bug Validator job without invoking FM-Agent.")
     parser.add_argument("action", choices=("next", "start", "retry", "run-dynamic", "submit-agent-execution", "submit-finalization"))
-    parser.add_argument("--project", required=True); parser.add_argument("--job-id", required=True); parser.add_argument("--receipt-json")
+    parser.add_argument("--project", required=True); parser.add_argument("--job-id", required=True)
     parser.add_argument("--host", choices=("auto", "claude", "codex", "portable"), default="auto")
     args = parser.parse_args(); target = project(args)
     try:
@@ -530,11 +550,7 @@ def main() -> None:
         elif args.action == "run-dynamic": result = run_dynamic(target, args.job_id)
         elif args.action == "submit-agent-execution": result = submit_agent_execution(target, args.job_id)
         else:
-            # ``--receipt-json`` is accepted for compatibility with an active
-            # Coordinator, but the executor derives the authoritative receipt
-            # from the final report and does not consume host-authored fields.
-            receipt = json.loads(args.receipt_json) if args.receipt_json else None
-            result = submit_finalization(target, args.job_id, receipt)
+            result = submit_finalization(target, args.job_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (ValueError, json.JSONDecodeError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)); raise SystemExit(2)

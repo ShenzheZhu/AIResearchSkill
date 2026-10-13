@@ -1,6 +1,6 @@
 # Incremental reuse and independent candidates
 
-Read this for a code/requirement update after a completed analysis, for `--all-bugs`, or for interpreting loop evidence. The method follows FM-Agent's [incremental reasoning](https://arxiv.org/html/2604.11556v2#S7) and [loop obligations](https://arxiv.org/html/2604.11556v2#S5). The deterministic runtime still delegates semantic work only to fresh native Codex Workers.
+Read this for a code/requirement update after a completed analysis, for `--all-bugs`, or for interpreting loop evidence. The method follows FM-Agent's [incremental reasoning](https://arxiv.org/html/2604.11556v2#S7) and [loop obligations](https://arxiv.org/html/2604.11556v2#S5). The deterministic runtime delegates semantic work to isolated native Codex Workers. Spec and Verify always start independently; only validated Bug preparation may continue into its same-candidate execution ticket.
 
 ## Select the actual mode
 
@@ -35,9 +35,27 @@ A modular MATCH is conditional on its recorded callee expectations. When a calle
 
 Current verification format separates a function from its direct candidates. `reasoning_complete` records whether all assigned reasoning finished; each candidate has a function-bound `candidate_id` and its own A/B witness. In `--all-bugs` mode, continue after the first mismatch and deduplicate repeated descriptions of one cause. Callee-only failures stay `DEPENDENCY_RISK` rather than becoming another direct local bug.
 
-Bug Validation planning, tickets, commands, finalization, gates, reports and ledger entries bind both `candidate_id` and the actual `function_id`. One confirmed candidate cannot confirm another. Confirmation, rejection and unavailable execution remain separate outcomes. Partial MATCH/MISMATCH results and pending candidates block completion; accepted INCONCLUSIVE/DEPENDENCY_RISK results remain explicit gaps. Multiple probes for one candidate do not increase the number of independent defects.
+Bug Validation planning, tickets, commands, local report generation, gates and ledger entries bind both `candidate_id` and the actual `function_id`. One confirmed candidate cannot confirm another. Confirmation, rejection and unavailable execution remain separate outcomes. Partial MATCH/MISMATCH results and pending candidates block completion; accepted INCONCLUSIVE/DEPENDENCY_RISK results remain explicit gaps. Multiple probes for one candidate do not increase the number of independent defects.
 
 The phase driver's next action requeues current-run retryable jobs through the existing scheduler transition before dispatch. A rejected batch retains its valid siblings and repairs only invalid outputs; retries retain accepted attempt history, live leases and the existing runtime/negative budgets. Exhausted jobs remain terminal failures.
+
+Bug reports and canonical receipts are generated deterministically from validated
+immutable execution and accepted history. Preparation still validates before
+execution. The execution ticket may continue its same freshly isolated
+preparation Worker through `collaboration.followup_task` only for identical
+project/job/candidate/attempt/input hash; otherwise it launches fresh. No context
+crosses jobs or inherits parent history. Expected lifecycle counts fall from
+3 to 2 model turns per attempt and from 3 to 1 native context starts when safe
+continuation is available (otherwise 2); these are not measured wall-clock savings.
+
+Verify and Bug preparation receive the copied requirements and permitted caller
+evidence. An invalid or unclear witness domain becomes a named gap, never
+invented negative output or weakened Q. Valid unsupported evidence finishes
+inconclusive after its first attempt. Runtime errors and completed negative probes
+keep their budgets; retry with a distinct lawful witness/trigger or fix the actual
+execution error. An exact-input claim remains limited to that input and schedule.
+These execution changes do not establish a completed ECHO audit or rerun the
+historical calibration below.
 
 ## Explicit loop obligations
 
@@ -82,4 +100,4 @@ To repeat this pattern on another repository, use the same orchestrator and phas
 
 Resume is used only after an actual interruption; inspect is used after completion. These commands dispatch native work, not an unattended external-provider runner. This Python calibration does not establish native incremental acceptance for every other language, complex cycle or integration environment; caller/callee propagation also has separate deterministic regressions.
 
-Subsequent native repository execution exposed two dispatch gaps: retryable jobs were not requeued, and preparation could not read accepted prior probe observations. The runtime now requeues within the existing budgets and exposes only same-run, same-candidate evidence whose accepted receipt and saved bytes still match. Public-program dependency loading is permitted during reproduction without granting direct dependency/test inspection. Independent review added a same-snapshot changed-requirements regression; the updated deterministic suite passes 127 checks. These later checks do not relabel the earlier native calibration or prove every host environment compatible.
+Subsequent native repository execution exposed two dispatch gaps: retryable jobs were not requeued, and preparation could not read accepted prior probe observations. The runtime requeues within the existing budgets and exposes only same-run, same-candidate evidence whose accepted receipt and saved bytes still match. Public-program dependency loading is permitted during reproduction without granting direct dependency/test inspection. Independent review added a same-snapshot changed-requirements regression; that review's deterministic suite passed 127 checks. These later checks do not relabel the earlier native calibration or prove every host environment compatible.

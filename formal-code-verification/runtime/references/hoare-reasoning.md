@@ -17,7 +17,11 @@ Malformed spec, model/tool failure, or unparseable output is `ERROR`, not
 `MATCH` or `MISMATCH`; proceed with other functions.
 
 Treat the native three-field sidecar as original FM-Agent's model-derived
-condition B. Derive actual behavior A independently from the body. Never turn
+condition B. Derive actual behavior A independently from the body. Verify receives
+materialized copied requirements and permitted caller evidence. Check that a
+counterexample satisfies P and the governing input domain. If that domain is
+invalid or unclear, record a named gap rather than an invented negative output,
+an unrelated witness or a weakened Q. Never turn
 an observed constant, comparison, formula, field, or branch into its own proof
 obligation or use it to reinterpret B. Use `INCONCLUSIVE` only after the Worker
 names a genuine reasoning gap, not merely because no external prose exists.

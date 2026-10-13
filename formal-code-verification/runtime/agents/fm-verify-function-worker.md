@@ -26,6 +26,14 @@ for a direct local violation with a concrete counterexample. Use
 `DEPENDENCY_RISK` when only a bad callee affects this function, and `ERROR` for
 malformed input or failed reasoning.
 
+For each candidate, explain in its existing `reason` why the witness satisfies
+the exact P and the relevant declared input domain, citing permitted caller,
+schema or requirement evidence. Export accessibility is not proof of product
+reachability. Do not label a value excluded by a proven caller guard as a
+product counterexample; retain genuine failures at unvalidated public boundaries.
+Unresolved domain or reachability is `INCONCLUSIVE` with the missing evidence;
+never weaken Q or claim MATCH merely because a proposed witness is invalid.
+
 Write exactly one schema-version-3 result to each assigned path:
 
 ```json

@@ -333,8 +333,7 @@ def _verification(target: Path, record: dict, phase: str) -> dict:
         pending.append(artifact)
     batches = complexity.partition(target, pending, _config(target, record), "verify_batch")
     # A pair is cheaper and more failure-isolated as two compatibility jobs;
-    # normal batches begin at three functions, while simple layers can grow to
-    # the configured 10-20 range.
+    # normal batches begin at three functions and stay within configured limits.
     batches = [
         {**batch, "artifacts": [artifact]}
         for batch in batches if len(batch["artifacts"]) < 3 for artifact in batch["artifacts"]

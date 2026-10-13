@@ -112,14 +112,7 @@ class OnDemandValidationReceiptsTest(unittest.TestCase):
                             "commands": [{"command": f"{sys.executable} -B {probe} {snapshot}", "cwd": root.relative_to(snapshot).as_posix(),
                                           "returncode": executed.returncode, "stdout": executed.stdout, "stderr": executed.stderr}],
                         })
-                        self.assertEqual(bug_validation_executor.submit_agent_execution(snapshot, job_id)["pass"], "finalization")
-                        state.atomic_json(snapshot / job["bug_result_path"], {"candidate_id": candidate_id, "schema_version": 2, "bug_id": bug_id,
-                            "function_id": function_id, "snapshot_commit": "unversioned", "confirmation_status": "confirmed",
-                            "attempts": [{"ordinal": 1, "classification": "confirmed", "dynamic_evidence": {
-                                "reproduction_result": (root / "reproduction_result.json").relative_to(snapshot).as_posix(),
-                            }}],
-                        })
-                        self.assertEqual(bug_validation_executor.submit_finalization(snapshot, job_id)["status"], "succeeded")
+                        self.assertEqual(bug_validation_executor.submit_agent_execution(snapshot, job_id)["status"], "succeeded")
                         completed = orchestrate.validate_complete(source)
                         self.assertTrue(completed["ok"])
                         self.assertEqual(completed["summary"]["total_confirmed"], expected_count)

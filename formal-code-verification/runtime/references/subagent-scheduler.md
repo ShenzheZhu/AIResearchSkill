@@ -57,13 +57,20 @@ fields remain an `output` failure and are not a reason to abandon
 other batches or bypass the phase. `input`, `semantic`, and `cancelled` are
 terminal. A semantic verification error is recorded as `ERROR`, but the
 Verification gate cannot create an official baseline while any ERROR remains.
-A Bug Validator job
-has worker preparation, execution, and finalization passes in the default
+A Bug Validator job has preparation and execution passes in the default
 `agent-executed` mode; the optional `adapter` mode retains Coordinator-owned
-dynamic execution. Runtime failures retry up to five
-attempts by default. A completed negative Bug Validator result requeues the
-same job immediately twice by default, yielding three preserved probes; a
-confirmation finishes immediately. On resume, call
+dynamic execution. Reports and canonical receipts are generated locally from
+validated immutable execution and accepted history. Spec and Verify always
+start fresh independently. After preparation validation, Bug execution may
+continue the matching isolated preparation Worker through
+`collaboration.followup_task` for identical project/job/candidate/attempt/input
+hash; otherwise launch fresh. No context crosses jobs or inherits parent history.
+Runtime failures retry up to five attempts by default. A completed negative
+Bug Validator result requeues the same job immediately twice by default,
+yielding three preserved probes; use a distinct lawful witness/trigger for each
+retry or fix the actual execution error. A confirmation finishes immediately,
+and valid unsupported evidence finishes inconclusive on its first attempt.
+On resume, call
 `scheduler.py recover` before
 `scheduler.py ready`; valid stale outputs finish their job, invalid stale jobs
 requeue in place when attempts remain.

@@ -41,7 +41,6 @@ DEFAULT_CAPS = {
     "spec_concurrency": 8,
     "verify_concurrency": 12,
     "bug_validation_concurrency": 4,
-    "bug_validation_finalize_concurrency": 2,
     "read_only_plan_concurrency": 4,
 }
 
@@ -252,41 +251,16 @@ def _running(target):
     return [json.loads(row["payload_json"]) for row in rows]
 
 
-def _bug_validation_stage(job):
-    """Return the durable scheduling state for a live Bug Validator job.
-
-    Older checkpoints have no field and therefore conservatively retain a
-    primary validation slot until they reach a terminal scheduler state.
-    """
-    return job.get("bug_validation_stage", "validation")
-
-
-def _uses_worker_slot(job):
-    return not (job.get("type") == "bug_validate" and _bug_validation_stage(job) == "ready_to_finalize")
-
-
 def _capacity(target):
     caps, running = _caps(target), _running(target)
-    active_jobs = [job for job in running if _uses_worker_slot(job)]
     by_type = {
-        kind: sum(
-            1 for job in active_jobs
-            if job.get("type") == kind and not (kind == "bug_validate" and _bug_validation_stage(job) == "finalization")
-        )
+        kind: sum(1 for job in running if job.get("type") == kind)
         for kind in JOB_TYPES
     }
     return {
         "caps": caps,
-        "active": len(active_jobs),
+        "active": len(running),
         "by_type": by_type,
-        "bug_validation_finalizing": sum(
-            1 for job in active_jobs
-            if job.get("type") == "bug_validate" and _bug_validation_stage(job) == "finalization"
-        ),
-        "bug_validation_ready_to_finalize": sum(
-            1 for job in running
-            if job.get("type") == "bug_validate" and _bug_validation_stage(job) == "ready_to_finalize"
-        ),
     }
 def _admission_error(target, job):
     capacity = _capacity(target); caps = capacity["caps"]
@@ -297,56 +271,6 @@ def _admission_error(target, job):
     return None
 
 
-def mark_bug_validation_ready_to_finalize(target, job_id):
-    """Release the probe slot once immutable execution evidence is accepted."""
-    job = _load(target, job_id)
-    if job.get("type") != "bug_validate" or job.get("status") != "running":
-        raise ValueError("only a running Bug Validator can await finalization")
-    stage = _bug_validation_stage(job)
-    if stage == "validation":
-        job["bug_validation_stage"] = "ready_to_finalize"
-        _save(target, job)
-    elif stage not in {"ready_to_finalize", "finalization"}:
-        raise ValueError("invalid Bug Validator scheduling stage")
-    return _load(target, job_id)
-
-
-def claim_bug_validation_finalization(target, job_id):
-    """Reserve a bounded finalization worker without consuming a probe slot."""
-    job = _load(target, job_id)
-    if job.get("type") != "bug_validate" or job.get("status") != "running":
-        raise ValueError("only a running Bug Validator can finalize")
-    if _bug_validation_stage(job) == "finalization":
-        return job
-    if _bug_validation_stage(job) != "ready_to_finalize":
-        raise ValueError("Bug Validator execution evidence has not been accepted")
-    capacity = _capacity(target); caps = capacity["caps"]
-    if capacity["active"] >= caps["max_active_subagents"]:
-        raise ValueError(f"global subagent capacity reached ({capacity['active']}/{caps['max_active_subagents']})")
-    active = capacity["bug_validation_finalizing"]
-    limit = caps["bug_validation_finalize_concurrency"]
-    if active >= limit:
-        raise ValueError(f"bug validation finalization capacity reached ({active}/{limit})")
-    job["bug_validation_stage"] = "finalization"
-    _save(target, job)
-    return _load(target, job_id)
-
-
-def admissible_bug_validation_finalizations(target, limit=None):
-    """List unleased finalize passes that fit their own and global pools."""
-    capacity = _capacity(target); caps = capacity["caps"]
-    available = min(
-        caps["bug_validation_finalize_concurrency"] - capacity["bug_validation_finalizing"],
-        caps["max_active_subagents"] - capacity["active"],
-    )
-    if limit is not None:
-        available = min(available, max(0, int(limit)))
-    if available <= 0:
-        return []
-    return [
-        job for job in _running(target)
-        if job.get("type") == "bug_validate" and _bug_validation_stage(job) == "ready_to_finalize"
-    ][:available]
 def _validate_report(job, result):
     # Keep interrupted analyses created by the pre-receipt scheduler resumable.
     # New manifests always carry phase + receipt requirements.
@@ -966,7 +890,6 @@ def transition(target, job_id, action, result, message, failure_class, attempt=N
         job["status"] = "running"; job["attempts"] += 1; job["started_at"] = state.now()
         if job["type"] == "bug_validate" and not job.get("legacy_contract"):
             job["negative_attempt_index"] = int(job.get("negative_attempts", 0)) + 1
-            job["bug_validation_stage"] = "validation"
         connection = _connect(target)
         connection.execute("BEGIN IMMEDIATE")
         try:
@@ -1029,7 +952,13 @@ def transition(target, job_id, action, result, message, failure_class, attempt=N
         elif job["type"] == "bug_validate" and not job.get("legacy_contract") and result["classification"] in BUG_NEGATIVE_CLASSIFICATIONS:
             negative_attempts = int(job.get("negative_attempts", 0)) + 1
             job["negative_attempts"] = negative_attempts; job["result"] = result
-            if negative_attempts < int(job["negative_max_attempts"]):
+            report = state.read_json(target / job["bug_result_path"], {})
+            evidence = report["attempts"][-1]["dynamic_evidence"]["reproduction_result"]
+            unsupported = state.read_json(target / evidence, {})["state"] == "unsupported"
+            if unsupported:
+                # Repeating an unavailable runtime cannot add execution evidence.
+                job.update({"status": "succeeded", "completed_at": state.now()})
+            elif negative_attempts < int(job["negative_max_attempts"]):
                 job.update({"status": "retryable", "retry_reason": "negative_result", "message": "Bug Validator did not confirm the candidate; repeat probe required"})
             else: job.update({"status": "succeeded", "completed_at": state.now(), "negative_validation_exhausted": True})
         else:

@@ -129,6 +129,20 @@ def _related_artifacts(target: Path, artifacts: list[str]) -> set[str]:
     return related - selected
 
 
+def normative_read_paths(target: Path) -> set[str]:
+    """Share the already materialized requirements/domain evidence across reasoning stages."""
+    domain = state.fm_dir(target) / "spec_prompts" / "domain_context"
+    paths = {
+        "fm_agent/spec_prompts/domain_context/engine_overview.txt",
+        "fm_agent/spec_prompts/domain_context/user_knowledge/manifest.json",
+    }
+    paths.update(path.relative_to(target).as_posix() for path in domain.glob("phase_*_types.txt"))
+    manifest = state.read_json(domain / "user_knowledge" / "manifest.json", {})
+    paths.update(item["copied_path"] for item in manifest.get("entries", [])
+                 if isinstance(item, dict) and isinstance(item.get("copied_path"), str))
+    return {path for path in paths if (target / path).is_file()}
+
+
 def _read_paths(target: Path, job: dict) -> list[str]:
     paths = {
         f"fm_agent_skill/jobs/{job['id']}.json",
@@ -144,8 +158,6 @@ def _read_paths(target: Path, job: dict) -> list[str]:
     elif kind in {"spec_batch", "incremental_spec_plan", "reconcile_caller_info"}:
         paths.update({
             "fm_agent/spec_prompts/system_prompt.md",
-            "fm_agent/spec_prompts/domain_context/engine_overview.txt",
-            "fm_agent/spec_prompts/domain_context/user_knowledge/manifest.json",
             "fm_agent_skill/control/graph_edges.json",
         })
         for artifact in job.get("artifacts", []):
@@ -177,12 +189,7 @@ def _read_paths(target: Path, job: dict) -> list[str]:
             source = _source_for_artifact(target, artifact)
             if source:
                 paths.add(source)
-        for candidate in (state.fm_dir(target) / "spec_prompts" / "domain_context").glob("phase_*_types.txt"):
-            rel = _relative(target, candidate)
-            if rel:
-                paths.add(rel)
-        manifest = state.read_json(target / "fm_agent/spec_prompts/domain_context/user_knowledge/manifest.json", {})
-        paths.update(item["copied_path"] for item in manifest.get("entries", []) if isinstance(item, dict) and isinstance(item.get("copied_path"), str))
+        paths.update(normative_read_paths(target))
     elif kind in {"select_relevant_modules", "select_relevant_files"}:
         paths.update({"fm_agent/phases.json", "fm_agent_skill/control/diff.json", "fm_agent_skill/control/graph_edges.json"})
         if kind == "select_relevant_files":
@@ -195,7 +202,9 @@ def _read_paths(target: Path, job: dict) -> list[str]:
             if item["path"] in sources:
                 paths.update(f"fm_agent/extracted_functions/{item['artifact']}{suffix}" for suffix in ("", ".spec.json", ".info.json"))
     elif kind in {"verify_function", "verify_batch"}:
-        for artifact in job["artifacts"]:
+        paths.update(normative_read_paths(target))
+        paths.add("fm_agent_skill/control/graph_edges.json")
+        for artifact in set(job["artifacts"]) | _related_artifacts(target, job["artifacts"]):
             paths.update({
                 f"fm_agent/extracted_functions/{artifact}",
                 f"fm_agent/extracted_functions/{artifact}.spec.json",

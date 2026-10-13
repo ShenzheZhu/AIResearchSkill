@@ -32,10 +32,10 @@ def earliest_incomplete(target: Path) -> str:
     return next((phase for phase in record.get("phases", []) if phase in pending), record.get("current_phase", "finalize"))
 
 
-def _claim_descriptor(job: dict, action: str = "claim_worker") -> dict:
+def _claim_descriptor(job: dict) -> dict:
     """A small, non-leasing candidate descriptor safe for host tool output."""
     return {
-        "action": action,
+        "action": "claim_worker",
         "job_id": job["id"],
         "type": job["type"],
         "phase": job["phase"],
@@ -63,11 +63,6 @@ def claim(target: Path, job_id: str, host: str = "auto") -> dict:
     tickets it never launched.
     """
     job = scheduler._load(target, job_id)
-    if job.get("type") == "bug_validate" and job.get("status") == "running" and job.get("bug_validation_stage") == "ready_to_finalize":
-        # The execution evidence has already released its primary slot.  This
-        # atomically reserves only a bounded finalization slot.
-        finalized = scheduler.claim_bug_validation_finalization(target, job_id)
-        return bug_validation_executor.worker_request(target, finalized, "finalization", host)
     if job.get("type") in SEMANTIC_TYPES and job.get("phase") == "verify_affected":
         semantic_executor._active(target, job["phase"])
     if not any(item.get("id") == job_id for item in scheduler.admissible(target)["jobs"]):
@@ -99,15 +94,9 @@ def next_actions(target: Path, limit: int, offset: int = 0, turn_budget_remainin
         for job in scheduler.current_jobs_for_phase(target, phase):
             if job.get("status") == "retryable":
                 scheduler.transition(target, job["id"], "retry", None, None, "execution")
-    finalizations = scheduler.admissible_bug_validation_finalizations(target, limit=limit)
-    capacity_after_finalizations = scheduler._capacity(target)["active"] + len(finalizations)
-    primary_budget = max(0, min(limit - len(finalizations), scheduler._caps(target)["max_active_subagents"] - capacity_after_finalizations))
     admitted = scheduler.admissible(target)["jobs"]
-    selected = admitted[offset:offset + primary_budget]
-    actions = [
-        *[_claim_descriptor(job, "claim_finalization") for job in finalizations],
-        *[_claim_descriptor(job) for job in selected],
-    ]
+    selected = admitted[offset:offset + limit]
+    actions = [_claim_descriptor(job) for job in selected]
     aggregate = scheduler.aggregate(target)
     failed = any(group["status"] == "failed" for group in aggregate["groups"])
     running = any(group["status"] == "running" for group in aggregate["groups"])
@@ -128,7 +117,7 @@ def next_actions(target: Path, limit: int, offset: int = 0, turn_budget_remainin
             **coordinator_contract.invocation(host),
             "continuation_required": action not in {"dag_converged", "phase_failed"},
             "next_step": (
-                "claim one returned candidate or finalization pass, launch its Worker immediately, then repeat until every returned descriptor is claimed"
+                "claim one returned candidate, launch its Worker immediately, then repeat until every returned descriptor is claimed"
                 if action == "dispatch" else
                 "wait only for an already-running Worker receipt, then call next"
                 if action == "wait_for_completion_event" else

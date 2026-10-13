@@ -72,7 +72,7 @@ def for_job_type(job_type: str) -> str:
         raise ValueError(f"job type has no registered Worker contract: {job_type}") from exc
 
 
-def invocation(worker: str, host: str = "auto") -> dict:
+def invocation(worker: str, host: str = "auto", *, candidate_continuation: dict | None = None) -> dict:
     """Build the exact host action without embedding semantic instructions."""
     resolved = resolve_host(host)
     definition = definition_path(worker)
@@ -84,7 +84,7 @@ def invocation(worker: str, host: str = "auto") -> dict:
     if resolved == "claude":
         return {**common, "host": resolved, "kind": "registered_worker", "name": worker}
     if resolved == "codex":
-        return {
+        action = {
             **common,
             "host": resolved,
             "kind": "generic_subagent",
@@ -110,6 +110,26 @@ def invocation(worker: str, host: str = "auto") -> dict:
                 "tests, answer keys, issue labels, or previous conclusions that are not permitted evidence."
             ),
         }
+        if candidate_continuation is not None:
+            if worker != "fm-agent-skill:fm-bug-validate-worker":
+                raise ValueError("context continuation is limited to the assigned Bug Validator")
+            action.update({
+                "native_followup_tool": "collaboration.followup_task",
+                "candidate_continuation": candidate_continuation,
+                "launch_mode": "continue_assigned_candidate_or_fresh",
+                "developer_instruction": (
+                    "Continue the preparation Worker with collaboration.followup_task only after the Coordinator "
+                    "has validated preparation and issued this execution ticket. That Worker must have started "
+                    "with fork_turns='none', handled only this project/job/candidate/attempt, and received no "
+                    "tests, answer keys or unrelated task messages. It may retain its permitted preparation "
+                    "evidence. Pass only this complete execution ticket and its immutable definition. "
+                    "Never reuse another candidate, attempt or unavailable/refused Worker context. If the "
+                    "matching context or followup tool is unavailable, launch a new fresh execution Worker "
+                    "using native_launch_tool and native_launch_arguments. The parent never executes semantic "
+                    "Worker work or bypasses preparation validation."
+                ),
+            })
+        return action
     return {
         **common,
         "host": resolved,

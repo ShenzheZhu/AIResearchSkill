@@ -19,10 +19,12 @@ does not authorize product fixes; apply none unless the user requests them.
 
 The Coordinator or a read-only scout may inspect existing tests to discover
 missing coverage. Do this before FM-Agent phase planning and keep it outside
-semantic Worker inputs. Launch semantic Workers with `fork_turns="none"`; supply only tickets, immutable definitions and permitted evidence. Never inherit the discovery parent's test/answer history. Immutable Spec, Verify, and Bug Workers never read
+semantic Worker inputs. Start semantic Workers with `fork_turns="none"`; supply only tickets, immutable definitions and permitted evidence. Spec and Verify always use independent fresh contexts. Only Bug execution may continue its matching isolated preparation Worker after validation, with the identical project/job/candidate/attempt/input hash; otherwise start fresh. Never reuse contexts across jobs or inherit the discovery parent's test/answer history. Immutable Spec, Verify, and Bug Workers never read
 project tests. Give them distilled requirements and caller intent with source
 citations, never test solutions, expected bug triggers, or known-bug answer keys.
 Keep their full definitions, tickets, allowed paths, and runtime gates unchanged.
+The runtime includes materialized copied requirements and permitted caller
+evidence in Verify and Bug preparation tickets.
 
 ## Four steps
 
@@ -50,7 +52,13 @@ Keep their full definitions, tickets, allowed paths, and runtime gates unchanged
    P needs a proven caller guard; reachable invalid inputs belong in Q's failure
    behavior. Let the unchanged FM-Agent Workers derive actual behavior and
    counterexamples, then validate candidates against actual code through the
-   runtime's existing Bug Validation execution. After a real reproduction,
+   runtime's existing Bug Validation execution. Establish that the actual witness
+   satisfies P and the governing input domain before probing. An invalid or
+   unclear domain is a named gap; never invent negative output, substitute an
+   unrelated witness, or weaken Q. Valid unsupported evidence finishes
+   inconclusive on its first attempt. Runtime and completed-negative budgets
+   remain, but retries need a distinct lawful witness/trigger or a fix for the
+   actual execution error. After a real reproduction,
    correct mistaken model assumptions, revisit affected callers/flows, and
    rerun the relevant existing stages. After a completed baseline, use incremental
    selection with both the source differences and the developer's goal; include

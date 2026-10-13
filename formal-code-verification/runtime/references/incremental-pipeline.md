@@ -9,8 +9,11 @@ context and Git summaries remain observational.
 
 Drive every phase through `phase_driver.py next/execute`, using the returned
 analysis checkout. The driver owns deterministic actions and planning; the host
-claims and launches each returned native Worker with `fork_turns="none"` and
-submits its exact receipt. Do not manufacture selector or contract-update jobs.
+claims and starts returned native Workers with `fork_turns="none"` and submits
+their exact receipts. Spec and Verify have independent fresh contexts. Only a
+Bug execution ticket may continue its matching isolated preparation Worker
+after validation, for the same project/job/candidate/attempt/input hash; otherwise
+start fresh. Do not manufacture selector or contract-update jobs.
 
 1. `validate_baseline`: `executor.py validate-baseline` checks the original
    inventory, specifications, results, accepted candidate evidence, Git ref and
@@ -63,8 +66,11 @@ submits its exact receipt. Do not manufacture selector or contract-update jobs.
    A→B reasoning, candidate identities and required loop obligations.
 9. `bug_validation`: create one run-qualified job and private probe directory
    per selected direct candidate ID, with both `candidate_id` and actual
-   `function_id` in its input. Follow the executor's preparation, execution and
-   finalization actions. Only accepted real probe evidence confirms/rejects a
+   `function_id` in its input. Follow the executor's preparation and execution
+   actions; it generates reports and receipts locally from validated immutable
+   evidence and accepted history. Valid unsupported evidence ends inconclusive
+   on its first attempt; existing runtime and completed-negative budgets remain.
+   Only accepted real probe evidence confirms/rejects a
    candidate. Preserve unrelated original evidence; the current summary counts
    qualified current and retained candidate outcomes without double counting.
 10. `finalize`: validate all current/reused function artifacts and every accepted

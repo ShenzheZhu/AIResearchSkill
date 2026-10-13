@@ -84,21 +84,21 @@ class TerminalCoverageTest(unittest.TestCase):
             self.assertEqual(report["audit_status"], "completed_with_gaps")
             self.assertEqual(report["findings"]["inconclusive"][0]["attempts"], [{
                 "ordinal": 1, "classification": "inconclusive", "state": "completed",
-                "reason": "Recorded public-entry probe outcome",
+                "reason": "Recorded probe outcome",
             }])
 
-    def test_prior_unavailable_execution_remains_visible_after_a_negative_probe(self) -> None:
+    def test_prior_inconclusive_execution_remains_visible_after_a_negative_probe(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary).resolve()
-            write_accepted_candidate(target, status="inconclusive", prior_unsupported=True)
+            write_accepted_candidate(target, status="inconclusive", prior_inconclusive=True)
             state.atomic_json(checkpoint.root(target) / "official_result.json", {"official_result_available": True})
             self.coverage(target, [self.row(status="unknown", evidence=[])])
             report = self.build(target, [{"function_id": "calc.py::inc", "verdict": "MISMATCH"}])
             finding = report["findings"]["inconclusive"][0]
             self.assertEqual(finding["attempt_count"], 2)
             self.assertEqual(finding["attempts"], [
-                {"ordinal": 1, "classification": "inconclusive", "state": "unsupported", "reason": "Required persistence service unavailable"},
-                {"ordinal": 2, "classification": "not_reproduced", "state": "completed", "reason": "Recorded public-entry probe outcome"},
+                {"ordinal": 1, "classification": "inconclusive", "state": "completed", "reason": "Recorded probe outcome"},
+                {"ordinal": 2, "classification": "not_reproduced", "state": "completed", "reason": "Recorded probe outcome"},
             ])
             self.assertEqual(report["audit_status"], "completed_with_gaps")
 

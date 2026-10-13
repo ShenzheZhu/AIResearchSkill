@@ -173,13 +173,11 @@ class BugValidationReceiptTest(unittest.TestCase):
                 return {**job, "status": "succeeded"}
 
             with patch.object(bug_validation_executor, "load_job", return_value=job), \
-                 patch.object(bug_validation_executor, "finalization_matches_current_attempt", return_value=True), \
+                 patch.object(bug_validation_executor, "write_finalization"), \
                  patch.object(bug_validation_executor.scheduler, "transition", side_effect=transition), \
                  patch.object(bug_validation_executor, "next_action", return_value={"action": "terminal", "status": "succeeded"}), \
                  patch.object(bug_validation_executor, "all_phase_jobs_succeeded", return_value=False):
-                bug_validation_executor.submit_finalization(target, job["id"], {
-                    "job_id": job["id"], "status": "completed", "outputs": [output],
-                })
+                bug_validation_executor.submit_finalization(target, job["id"])
 
             self.assertEqual(captured["action"], "complete")
             self.assertEqual(captured["receipt"], {

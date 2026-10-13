@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Malformed final reports remain repairable before scheduler success."""
+"""Local reports retain the execution identity and bounded retry contract."""
 from __future__ import annotations
 
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
@@ -14,6 +13,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
 from fm_agent_core import state
 import bug_validation_executor
 import scheduler
+import test_bug_worker_ticket as ticket_fixture
 
 
 class FinalizationIdentityTest(unittest.TestCase):
@@ -22,14 +22,14 @@ class FinalizationIdentityTest(unittest.TestCase):
         entrypoint = {"ecosystem": "host-project-toolchain", "kind": "module", "target": "calc.py", "symbol": "inc"}
         state.atomic_json(root / "reproduction.json", {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"),
             "schema_version": 3, "bug_id": "candidate", "attempt": attempt,
-            "snapshot_commit": "snapshot", "language": "python", "public_entrypoint": entrypoint,
+            "snapshot_commit": "unversioned", "language": "python", "public_entrypoint": entrypoint,
             "probe_file": "probe.py", "expected_marker": "CONFIRMED",
             "not_confirmed_marker": "NOT CONFIRMED", "timeout_seconds": 30,
         })
         (root / "probe.py").write_text('print("CONFIRMED")\n', encoding="utf-8")
         state.atomic_json(root / "reproduction_result.json", {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"),
             "schema_version": 2, "execution_mode": "agent-executed", "bug_id": "candidate",
-            "attempt": attempt, "snapshot_commit": "snapshot", "language": "python",
+            "attempt": attempt, "snapshot_commit": "unversioned", "language": "python",
             "public_entrypoint": entrypoint, "state": "completed", "classification": "confirmed",
             "reason": "The executed probe reproduced the mismatch",
             "commands": [{"command": "python3 probe.py", "cwd": root.relative_to(target).as_posix(),
@@ -37,49 +37,38 @@ class FinalizationIdentityTest(unittest.TestCase):
         })
         return (root / "reproduction_result.json").relative_to(target).as_posix()
 
-    def test_missing_or_wrong_identity_retries_then_repaired_report_succeeds(self) -> None:
+    def test_missing_or_wrong_execution_identity_retries_then_valid_execution_succeeds(self) -> None:
         for invalid_identity in (None, "calc.py::other"):
-            with self.subTest(identity=invalid_identity), tempfile.TemporaryDirectory() as temporary, \
-                 patch.object(state, "current_snapshot_commit", return_value="snapshot"), \
-                 patch.object(state, "direct_mismatch_ids", return_value={"calc.py::inc"}):
+            with self.subTest(identity=invalid_identity), tempfile.TemporaryDirectory() as temporary:
                 target = Path(temporary).resolve()
-                state.atomic_json(state.skill_dir(target) / "active.json", {
-                    "mode": "full", "status": "running", "snapshot_commit": "snapshot",
-                    "validation_scope": ["calc.py::inc"], "fingerprint": "identity-test", "phases": ["bug_validation"], "current_phase": "bug_validation",
-                })
-                job = scheduler.create(target, {
-                    "id": "bug-validation-candidate", "phase": "bug_validation", "type": "bug_validate",
-                    "depends_on": [], "artifacts": [], "required_outputs": ["fm_agent/bug_validation/candidate.result.json"],
-                    "input": {"candidate_id": state.candidate_id("calc.py::inc"), "bug_id": "candidate", "function_id": "calc.py::inc", "mode": "full"},
-                })
-                scheduler.transition(target, job["id"], "start", None, None, "execution")
+                job = ticket_fixture.BugWorkerTicketTest().prepare(target)
+                record = state.active_record(target)
+                state.atomic_json(state.skill_dir(target) / "active.json", {**record, "validation_scope": ["calc.py::inc"]})
                 evidence = self.write_execution(target, 1)
-                self.assertEqual(bug_validation_executor.submit_agent_execution(target, job["id"])["pass"], "finalization")
-                report = {"candidate_id": state.candidate_id("calc.py::inc"), "function_id": "calc.py::inc", "schema_version": 2, "bug_id": "candidate",
-                    "snapshot_commit": "snapshot", "confirmation_status": "confirmed",
-                    "attempts": [{"ordinal": 1, "classification": "confirmed", "dynamic_evidence": {"reproduction_result": evidence}}],
-                }
-                report.pop("function_id", None)
+                result = state.read_json(target / evidence, {})
+                result.pop("function_id", None)
                 if invalid_identity is not None:
-                    report["function_id"] = invalid_identity
-                state.atomic_json(target / job["required_outputs"][0], report)
+                    result["function_id"] = invalid_identity
+                state.atomic_json(target / evidence, result)
+                with self.assertRaisesRegex(ValueError, "identity or outcome evidence"):
+                    bug_validation_executor.submit_agent_execution(target, job["id"])
+                self.assertFalse((target / job["bug_result_path"]).exists())
                 response = bug_validation_executor.submit_finalization(target, job["id"])
                 self.assertEqual(response["action"], "scheduler_start")
                 rejected = scheduler._load(target, job["id"])
                 self.assertEqual(rejected["status"], "queued")
-                self.assertEqual(rejected["failure_class"], "output")
-                self.assertIn("function identity", rejected["message"])
+                self.assertEqual(rejected["failure_class"], "execution")
+                self.assertIn("identity or outcome evidence", rejected["message"])
                 self.assertEqual(rejected["runtime_attempts"], 1)
 
                 scheduler.transition(target, job["id"], "start", None, None, "execution")
                 evidence = self.write_execution(target, 2)
-                self.assertEqual(bug_validation_executor.submit_agent_execution(target, job["id"])["pass"], "finalization")
-                report["function_id"] = "calc.py::inc"
-                report["attempts"] = [{"ordinal": 2, "classification": "confirmed", "dynamic_evidence": {"reproduction_result": evidence}}]
-                state.atomic_json(target / job["required_outputs"][0], report)
-                accepted = bug_validation_executor.submit_finalization(target, job["id"])
+                accepted = bug_validation_executor.submit_agent_execution(target, job["id"])
                 self.assertEqual(accepted["status"], "succeeded")
                 self.assertEqual(scheduler._load(target, job["id"])["result"]["classification"], "confirmed")
+                report = state.read_json(target / job["bug_result_path"], {})
+                self.assertEqual(report["function_id"], "calc.py::inc")
+                self.assertEqual(report["attempts"], [{"ordinal": 2, "classification": "confirmed", "dynamic_evidence": {"reproduction_result": evidence}}])
 
 
 if __name__ == "__main__":

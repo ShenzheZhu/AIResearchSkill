@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# Modified by AIResearchSkill: resolve macOS aliases and supply approved execution evidence before finalization.
-"""Regression checks for separate Bug Validation execution/finalize pools."""
+"""Regression checks for bounded Bug Validation job capacity."""
 from __future__ import annotations
 
 import sys
@@ -8,86 +7,77 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
 
-import scheduler  # noqa: E402
-import durable_executor  # noqa: E402
-from fm_agent_core import state  # noqa: E402
+import scheduler
+import durable_executor
+from config import DEFAULTS
+from fm_agent_core import state
 
 
-class BugValidationPoolsTest(unittest.TestCase):
+class BugValidationCapacityTest(unittest.TestCase):
     def _target(self, temporary: str) -> Path:
         target = Path(temporary).resolve()
-        state.atomic_json(target / "fm_agent_skill" / "active.json", {
-            "snapshot_commit": "unversioned", "fingerprint": "pool-test",
+        state.atomic_json(state.skill_dir(target) / "active.json", {
+            "snapshot_commit": "unversioned", "fingerprint": "capacity-test",
             "phases": ["bug_validation"], "current_phase": "bug_validation",
         })
-        state.atomic_json(target / "fm_agent_skill" / "config.json", {
-            "max_active_subagents": 6,
-            "bug_validation_concurrency": 4,
-            "bug_validation_finalize_concurrency": 2,
+        state.atomic_json(state.skill_dir(target) / "config.json", {
+            "max_active_subagents": 6, "bug_validation_concurrency": 4,
         })
         for index in range(7):
             scheduler.create(target, {
                 "id": f"bug-{index}", "phase": "bug_validation", "type": "bug_validate",
                 "depends_on": [], "required_outputs": [f"fm_agent/bug_validation/{index}.result.json"],
-                "artifacts": [], "input": {"candidate_id": state.candidate_id(f"f-{index}"), "bug_id": f"bug-{index}", "function_id": f"f-{index}", "mode": "full"},
+                "artifacts": [], "input": {"candidate_id": state.candidate_id(f"f-{index}"),
+                    "bug_id": f"bug-{index}", "function_id": f"f-{index}", "mode": "full"},
             })
         return target
 
-    def test_ready_to_finalize_releases_primary_slot_and_finalize_is_bounded(self) -> None:
+    def test_running_validation_obeys_primary_capacity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = self._target(temporary)
             for index in range(4):
                 scheduler.transition(target, f"bug-{index}", "start", None, None, "execution")
-            for index in range(2):
-                scheduler.mark_bug_validation_ready_to_finalize(target, f"bug-{index}")
-                scheduler.claim_bug_validation_finalization(target, f"bug-{index}")
-
             capacity = scheduler._capacity(target)
-            self.assertEqual(capacity["by_type"]["bug_validate"], 2)
-            self.assertEqual(capacity["bug_validation_finalizing"], 2)
             self.assertEqual(capacity["active"], 4)
-            self.assertEqual([job["id"] for job in scheduler.admissible(target)["jobs"]], ["bug-4", "bug-5"])
+            self.assertEqual(capacity["by_type"]["bug_validate"], 4)
+            self.assertEqual(scheduler.admissible(target)["jobs"], [])
+            self.assertEqual(durable_executor.next_actions(target, 4)["dispatches"], [])
+            with self.assertRaisesRegex(ValueError, "bug_validate capacity reached"):
+                scheduler.transition(target, "bug-4", "start", None, None, "execution")
+            scheduler.transition(target, "bug-0", "fail", None, "Worker interrupted", "execution")
+            self.assertEqual(scheduler._capacity(target)["active"], 3)
+            listed = durable_executor.next_actions(target, 4)
+            self.assertEqual([item["job_id"] for item in listed["dispatches"]], ["bug-0"])
+            self.assertEqual(listed["dispatches"][0]["action"], "claim_worker")
+            self.assertEqual(scheduler._load(target, "bug-0")["status"], "queued")
 
-            scheduler.mark_bug_validation_ready_to_finalize(target, "bug-2")
-            with self.assertRaisesRegex(ValueError, "finalization capacity reached"):
-                scheduler.claim_bug_validation_finalization(target, "bug-2")
-            self.assertEqual(scheduler._load(target, "bug-2")["bug_validation_stage"], "ready_to_finalize")
-
-    def test_next_reoffers_ready_finalize_without_leasing_it(self) -> None:
+    def test_global_capacity_and_live_leases_survive_dispatch_listing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = self._target(temporary)
-            scheduler.transition(target, "bug-0", "start", None, None, "execution")
-            root = target / "fm_agent_skill/probes/bug-0/attempt_001"
-            entry = {"ecosystem": "host-project-toolchain", "kind": "module", "target": "calc.py", "symbol": "value"}
-            (target / "calc.py").write_text("def value(): return 1\n", encoding="utf-8")
-            state.atomic_json(root / "reproduction.json", {"function_id": "f-0", "candidate_id": state.candidate_id("f-0"),
-                "schema_version": 3, "bug_id": "bug-0", "attempt": 1, "snapshot_commit": "unversioned",
-                "language": "python", "public_entrypoint": entry, "probe_file": "probe.py", "timeout_seconds": 30,
-                "expected_marker": "CONFIRMED", "not_confirmed_marker": "NOT CONFIRMED",
+            state.atomic_json(state.skill_dir(target) / "config.json", {
+                "max_active_subagents": 3, "bug_validation_concurrency": 4,
             })
-            (root / "probe.py").write_text('print("CONFIRMED")\n', encoding="utf-8")
-            state.atomic_json(root / "reproduction_result.json", {"function_id": "f-0", "candidate_id": state.candidate_id("f-0"),
-                "schema_version": 2, "execution_mode": "agent-executed", "bug_id": "bug-0", "attempt": 1,
-                "snapshot_commit": "unversioned", "language": "python", "public_entrypoint": entry,
-                "state": "completed", "classification": "confirmed", "reason": "Recorded probe reproduced the mismatch",
-                "commands": [{"command": "python3 probe.py", "cwd": root.relative_to(target).as_posix(), "returncode": 0,
-                              "stdout": "CONFIRMED\n", "stderr": ""}],
-            })
-            scheduler.mark_bug_validation_ready_to_finalize(target, "bug-0")
-
-            listed = durable_executor.next_actions(target, limit=4)
-            self.assertEqual(listed["dispatches"][0]["action"], "claim_finalization")
-            self.assertEqual(listed["dispatches"][0]["job_id"], "bug-0")
-            self.assertEqual(scheduler._load(target, "bug-0")["bug_validation_stage"], "ready_to_finalize")
-
-            claimed = durable_executor.claim(target, "bug-0")
-            self.assertEqual(claimed["pass"], "finalization")
-            self.assertEqual(scheduler._load(target, "bug-0")["bug_validation_stage"], "finalization")
+            scheduler.create(target, {"id": "other", "phase": "bug_validation", "type": "phase_refine",
+                "depends_on": [], "required_outputs": [], "artifacts": []})
+            for job_id in ("bug-0", "bug-1", "other"):
+                scheduler.transition(target, job_id, "start", None, None, "execution")
+            connection = scheduler._connect(target)
+            leases = [dict(row) for row in connection.execute("SELECT * FROM leases ORDER BY job_id")]
+            connection.close()
+            listed = durable_executor.next_actions(target, 7)
+            self.assertEqual(listed["action"], "wait_for_completion_event")
+            self.assertEqual(listed["backpressure"]["active"], 3)
+            self.assertEqual(listed["dispatches"], [])
+            with self.assertRaisesRegex(ValueError, "global subagent capacity reached"):
+                scheduler.transition(target, "bug-2", "start", None, None, "execution")
+            connection = scheduler._connect(target)
+            self.assertEqual([dict(row) for row in connection.execute("SELECT * FROM leases ORDER BY job_id")], leases)
+            connection.close()
+            self.assertNotIn("bug_validation_finalize_concurrency", DEFAULTS)
+            self.assertNotIn("bug_validation_finalize_concurrency", scheduler.DEFAULT_CAPS)
 
 
 if __name__ == "__main__":

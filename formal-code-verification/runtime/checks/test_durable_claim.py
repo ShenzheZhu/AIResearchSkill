@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import bug_validation_executor as validator  # noqa: E402
+import complexity  # noqa: E402
 import durable_executor  # noqa: E402
 import scheduler  # noqa: E402
 import semantic_executor  # noqa: E402
@@ -48,8 +49,40 @@ class DurableClaimTest(unittest.TestCase):
             self.assertEqual(claimed["job_id"], "context")
             self.assertEqual(scheduler._load(target, "context")["status"], "running")
 
-    def test_default_worker_batch_size_is_three(self) -> None:
-        self.assertEqual(DEFAULTS["worker_max_functions"], 3)
+    def test_small_functions_share_batches_without_losing_any_function(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary).resolve()
+            artifacts = [f"calc-f{index}-1.py" for index in range(24)]
+            extracted = state.fm_dir(target) / "extracted_functions"
+            extracted.mkdir(parents=True)
+            for artifact in artifacts:
+                (extracted / artifact).write_text("def f(x):\n    return x + 1\n", encoding="utf-8")
+            for phase in ("spec_batch", "verify_function"):
+                with self.subTest(phase=phase):
+                    old = complexity.partition(target, artifacts, {**DEFAULTS, "worker_max_functions": 3}, phase)
+                    grouped = complexity.partition(target, artifacts, DEFAULTS, phase)
+                    self.assertEqual((len(old), len(grouped)), (8, 3))
+                    self.assertEqual([item for batch in grouped for item in batch["artifacts"]], artifacts)
+                    self.assertTrue(all(batch["estimated_tokens"] <= DEFAULTS["worker_target_tokens"] for batch in grouped))
+
+    def test_batching_preserves_complexity_and_source_byte_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary).resolve()
+            extracted = state.fm_dir(target) / "extracted_functions"
+            extracted.mkdir(parents=True)
+            simple = "def f(x):\n    return x + 1\n"
+            (extracted / "calc-small-1.py").write_text(simple, encoding="utf-8")
+            (extracted / "calc-branching-1.py").write_text(
+                "def f(x):\n" + "    if x > 0: x -= 1\n" * 160 + "    return x\n", encoding="utf-8",
+            )
+            (extracted / "calc-other-1.py").write_text(simple, encoding="utf-8")
+            artifacts = ["calc-small-1.py", "calc-branching-1.py", "calc-other-1.py"]
+            batches = complexity.partition(target, artifacts, DEFAULTS, "verify_function")
+            self.assertEqual([batch["artifacts"] for batch in batches], [[item] for item in artifacts])
+            self.assertGreater(batches[1]["estimated_tokens"], DEFAULTS["worker_target_tokens"])
+            small = [artifacts[0], artifacts[2]]
+            byte_limited = complexity.partition(target, small, {**DEFAULTS, "worker_max_source_bytes": len(simple.encode())}, "spec_batch")
+            self.assertEqual([batch["artifacts"] for batch in byte_limited], [[item] for item in small])
 
 
 class DurableRetryTest(unittest.TestCase):
@@ -69,14 +102,22 @@ class DurableRetryTest(unittest.TestCase):
             "depends_on": [], "required_outputs": [], "artifacts": [], "max_attempts": 2,
         })
 
+    def prepare_candidate(self, target: Path) -> dict:
+        job = ticket_fixture.BugWorkerTicketTest().prepare(target)
+        state.atomic_json(state.control_dir(target) / "job_plans/bug_validation.json", {
+            "schema_version": 1, "snapshot_commit": "unversioned",
+            "entries": [{"candidate_id": job["input"]["candidate_id"], "job_id": job["id"]}],
+        })
+        return job
+
     def test_accepted_negative_retry_preserves_history_and_enters_preparation(self) -> None:
-        for first_unsupported in (False, True):
-            with self.subTest(first_unsupported=first_unsupported), tempfile.TemporaryDirectory() as temporary:
+        for outcomes in (("not_reproduced", "not_reproduced"), ("not_reproduced", "unsupported"), ("inconclusive", "not_reproduced")):
+            with self.subTest(outcomes=outcomes), tempfile.TemporaryDirectory() as temporary:
                 target = Path(temporary).resolve()
                 state.atomic_json(state.skill_dir(target) / "config.json", {
                     "bug_validation_max_attempts": 2, "bug_validation_negative_retries": 1,
                 })
-                job = ticket_fixture.BugWorkerTicketTest().prepare(target)
+                job = self.prepare_candidate(target)
                 artifact = state.fm_dir(target) / "extracted_functions/calc-inc-1.py"
                 spec = state.read_json(Path(f"{artifact}.spec.json"), {})
                 spec["post_condition"] = "returns value + 2 at value=0 and value + 1 otherwise"
@@ -90,7 +131,7 @@ class DurableRetryTest(unittest.TestCase):
                 history = []
                 first_bytes = {}
                 first_receipt = None
-                for ordinal in (2, 3):
+                for ordinal, outcome in enumerate(outcomes, 2):
                     listed = durable_executor.next_actions(target, 4, host="codex")
                     self.assertEqual(listed["action"], "dispatch")
                     self.assertEqual([item["job_id"] for item in listed["dispatches"]], [job["id"]])
@@ -112,27 +153,29 @@ class DurableRetryTest(unittest.TestCase):
                         "public_entrypoint": entry, "probe_file": "probe.py", "timeout_seconds": 30,
                         "expected_marker": "CONFIRMED", "not_confirmed_marker": "NOT CONFIRMED"})
                     probe = root / "probe.py"
-                    probe.write_text("import sys\nsys.path.insert(0, sys.argv[1])\nfrom calc import inc\nprint('NOT CONFIRMED' if inc(1) == 2 else 'CONFIRMED')\n", encoding="utf-8")
-                    unsupported = ordinal == 2 and first_unsupported
+                    output = "NO MARKER" if outcome == "inconclusive" else "NOT CONFIRMED"
+                    probe.write_text(f"import sys\nsys.path.insert(0, sys.argv[1])\nfrom calc import inc\nassert inc(1) == 2\nprint({output!r})\n", encoding="utf-8")
+                    unsupported = outcome == "unsupported"
                     commands = []
                     if not unsupported:
                         result = subprocess.run([sys.executable, "-B", str(probe), str(target)], cwd=root, text=True, capture_output=True, check=True)
-                        self.assertEqual(result.stdout, "NOT CONFIRMED\n")
+                        self.assertEqual(result.stdout, output + "\n")
                         commands = [{"command": f"{sys.executable} -B {probe} {target}", "cwd": root.relative_to(target).as_posix(),
                                      "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}]
-                    classification = "inconclusive" if unsupported else "not_reproduced"
+                    classification = "inconclusive" if unsupported else outcome
                     evidence = (root / "reproduction_result.json").relative_to(target).as_posix()
                     state.atomic_json(target / evidence, {"schema_version": 2, **identity, "execution_mode": "agent-executed",
                         "language": "python", "public_entrypoint": entry, "state": "unsupported" if unsupported else "completed",
                         "classification": classification, "commands": commands, "reason": "Service unavailable" if unsupported else "Public probe ran"})
-                    finalization = validator.submit_agent_execution(target, job["id"])
-                    self.assertEqual(finalization["pass"], "finalization")
+                    completed = validator.submit_agent_execution(target, job["id"])
                     history.append({"ordinal": ordinal, "classification": classification, "dynamic_evidence": {"reproduction_result": evidence}})
-                    status = "inconclusive" if ordinal == 2 or first_unsupported else "rejected"
-                    state.atomic_json(target / job["bug_result_path"], {"schema_version": 2, **{key: value for key, value in identity.items() if key != "attempt"},
-                        "confirmation_status": status, "attempts": history})
-                    job = scheduler.transition(target, job["id"], "complete", validator.canonical_finalization_receipt(target, job), None, "execution")
-                    self.assertEqual(job["status"], "retryable" if ordinal == 2 else "succeeded")
+                    job = scheduler._load(target, job["id"])
+                    self.assertEqual(completed["action"], "scheduler_start" if ordinal == 2 else "terminal")
+                    self.assertEqual(job["status"], "queued" if ordinal == 2 else "succeeded")
+                    status = "rejected" if ordinal == 3 and all(item["classification"] == "not_reproduced" for item in history) else "inconclusive"
+                    report = state.read_json(target / job["bug_result_path"], {})
+                    self.assertEqual(report["confirmation_status"], status)
+                    self.assertEqual(report["attempts"], history)
                     connection = scheduler._connect(target)
                     receipts = [dict(row) for row in connection.execute("SELECT * FROM receipts WHERE job_id=? ORDER BY attempt", (job["id"],))]
                     connection.close()
@@ -145,9 +188,68 @@ class DurableRetryTest(unittest.TestCase):
                         for path, accepted_bytes in first_bytes.items():
                             self.assertEqual(path.read_bytes(), accepted_bytes)
                 self.assertEqual((job["attempts"], job["runtime_attempts"], job["negative_attempts"]), (3, 1, 2))
+                self.assertEqual(bool(job.get("negative_validation_exhausted")), outcomes[-1] != "unsupported")
                 accepted = scheduler.accepted_job(target, job["id"], snapshot_commit="unversioned", input_fingerprint="ticket-check")
                 self.assertEqual(accepted["validated_attempts"], history)
                 self.assertEqual(durable_executor.next_actions(target, 4)["action"], "dag_converged")
+
+    def test_first_unsupported_attempt_is_terminal_and_preserves_its_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary).resolve()
+            state.atomic_json(state.skill_dir(target) / "config.json", {"bug_validation_negative_retries": 2})
+            job = self.prepare_candidate(target)
+            root = ticket_fixture.BugWorkerTicketTest().execution(target)
+            execution_path = root / "reproduction_result.json"
+            execution = state.read_json(execution_path, {})
+            execution.update(state="unsupported", classification="inconclusive", commands=[], reason="Required runtime unavailable")
+            state.atomic_json(execution_path, execution)
+            completed = validator.submit_agent_execution(target, job["id"])
+            self.assertEqual((completed["action"], completed["status"]), ("terminal", "succeeded"))
+            accepted = scheduler.accepted_job(target, job["id"], snapshot_commit="unversioned", input_fingerprint="ticket-check")
+            self.assertEqual((accepted["attempts"], accepted["runtime_attempts"], accepted["negative_attempts"]), (1, 0, 1))
+            self.assertNotIn("negative_validation_exhausted", accepted)
+            self.assertEqual(state.read_json(target / accepted["bug_result_path"], {})["confirmation_status"], "inconclusive")
+            evidence_bytes = execution_path.read_bytes()
+            for _ in range(2):
+                self.assertEqual(durable_executor.next_actions(target, 4)["action"], "dag_converged")
+                self.assertEqual(scheduler._load(target, job["id"]), accepted)
+                self.assertEqual(execution_path.read_bytes(), evidence_bytes)
+            connection = scheduler._connect(target)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM receipts WHERE job_id=?", (job["id"],)).fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM leases WHERE job_id=?", (job["id"],)).fetchone()[0], 0)
+            connection.close()
+
+    def test_recorded_runtime_errors_retry_without_consuming_negative_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary).resolve()
+            state.atomic_json(state.skill_dir(target) / "config.json", {"bug_validation_max_attempts": 2})
+            job = self.prepare_candidate(target)
+            for ordinal in (1, 2):
+                if ordinal == 1:
+                    root = ticket_fixture.BugWorkerTicketTest().execution(target)
+                else:
+                    durable_executor.claim(target, job["id"])
+                    root = validator.attempt_dir(target, "candidate", ordinal)
+                    contract = state.read_json(validator.attempt_dir(target, "candidate", 1) / "reproduction.json", {})
+                    state.atomic_json(root / "reproduction.json", dict(contract, attempt=ordinal))
+                probe = root / "probe.py"
+                probe.write_text("raise RuntimeError('runtime failed')\n", encoding="utf-8")
+                result = subprocess.run([sys.executable, "-B", str(probe)], cwd=root, text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                execution = state.read_json(validator.attempt_dir(target, "candidate", 1) / "reproduction_result.json", {})
+                execution.update(attempt=ordinal, state="execution_error", classification="runtime_error", reason="Runtime command failed",
+                    commands=[{"command": f"{sys.executable} -B {probe}", "cwd": root.relative_to(target).as_posix(),
+                               "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}])
+                state.atomic_json(root / "reproduction_result.json", execution)
+                completed = validator.submit_agent_execution(target, job["id"])
+                self.assertEqual(completed["action"], "scheduler_start" if ordinal == 1 else "terminal")
+                job = scheduler._load(target, job["id"])
+                self.assertEqual(job["status"], "queued" if ordinal == 1 else "failed")
+                self.assertEqual((job["runtime_attempts"], job["negative_attempts"]), (ordinal, 0))
+                self.assertEqual(job.get("validated_attempts", []), [])
+            connection = scheduler._connect(target)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM receipts WHERE job_id=?", (job["id"],)).fetchone()[0], 0)
+            connection.close()
 
     def test_rejected_partial_batch_dispatches_only_invalid_outputs(self) -> None:
         artifacts = ["valid.py", "invalid.py"]

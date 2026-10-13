@@ -14,6 +14,13 @@ implementation.
 
 Use the dispatch ticket's permitted public-interface sources and direct graph
 neighbors.
+Ground the input domain in the permitted public interface, copied requirements,
+types, and proven caller/schema guards. A public helper export alone does not
+make every constructed value a supported product input. Distinguish documented
+API guarantees from guarded internal calls; do not invent size/format limits or
+unbounded preservation requirements. Inputs that can reach an unvalidated public
+boundary still require observable failure behavior in Q. When the domain is
+uncertain, state the unresolved assumption rather than silently choosing one.
 For an earlier caller whose valid sidecars are present, read its specification
 and `.info.json` callee expectation exactly as original FM-Agent supplies
 earlier-layer caller specs. Use direct callee sources to write complete callee

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -20,7 +21,7 @@ import bug_validation_executor
 import scheduler
 
 
-def write_accepted_candidate(target: Path, function_id="calc.py::inc", bug_id="candidate", status="confirmed", *, prior_unsupported=False, candidate_ordinal=1) -> dict:
+def write_accepted_candidate(target: Path, function_id="calc.py::inc", bug_id="candidate", status="confirmed", *, prior_inconclusive=False, candidate_ordinal=1) -> dict:
     identity = state.candidate_id(function_id, candidate_ordinal)
     snapshot = state.current_snapshot_commit(target)
     if not state.active_record(target):
@@ -75,12 +76,12 @@ def write_accepted_candidate(target: Path, function_id="calc.py::inc", bug_id="c
     output = f"fm_agent/bug_validation/{bug_id}.result.json"
     job = scheduler.create(target, {
         "id": f"bug-validation-{bug_id}", "phase": "bug_validation", "type": "bug_validate",
-        "depends_on": [], "required_outputs": [output], "artifacts": [], "negative_retries": 1 if prior_unsupported else 0,
+        "depends_on": [], "required_outputs": [output], "artifacts": [], "negative_retries": 1 if prior_inconclusive else 0,
         "input": {"candidate_id": identity, "bug_id": bug_id, "function_id": function_id, "mode": "full"},
     })
     entrypoint = {"ecosystem": "host-project-toolchain", "kind": "module", "target": "calc.py", "symbol": "inc"}
     attempts = []
-    for ordinal in range(1, 3 if prior_unsupported else 2):
+    for ordinal in range(1, 3 if prior_inconclusive else 2):
         job = scheduler.transition(target, job["id"], "start", None, None, "execution")
         root = bug_validation_executor.attempt_dir(target, bug_id, ordinal)
         state.atomic_json(root / "reproduction.json", {"function_id": function_id, "candidate_id": identity,
@@ -88,18 +89,19 @@ def write_accepted_candidate(target: Path, function_id="calc.py::inc", bug_id="c
             "language": "python", "public_entrypoint": entrypoint, "probe_file": "probe.py",
             "expected_marker": "CONFIRMED", "not_confirmed_marker": "NOT CONFIRMED", "timeout_seconds": 30,
         })
-        classification = ("inconclusive" if ordinal == 1 else "not_reproduced") if prior_unsupported else "not_reproduced" if status == "rejected" else status
+        classification = ("inconclusive" if ordinal == 1 else "not_reproduced") if prior_inconclusive else "not_reproduced" if status == "rejected" else status
         marker = {"confirmed": "CONFIRMED", "not_reproduced": "NOT CONFIRMED", "inconclusive": "no outcome marker"}[classification]
-        unsupported = prior_unsupported and ordinal == 1
-        (root / "probe.py").write_text(f"print({marker!r})\n", encoding="utf-8")
+        probe = root / "probe.py"
+        probe.write_text(f"print({marker!r})\n", encoding="utf-8")
+        result = subprocess.run([sys.executable, "-B", str(probe)], cwd=root, text=True, capture_output=True, check=True)
         evidence = (root / "reproduction_result.json").relative_to(target).as_posix()
         state.atomic_json(target / evidence, {"function_id": function_id, "candidate_id": identity,
             "schema_version": 2, "execution_mode": "agent-executed", "bug_id": bug_id, "attempt": ordinal,
             "snapshot_commit": snapshot, "language": "python", "public_entrypoint": entrypoint,
-            "state": "unsupported" if unsupported else "completed", "classification": classification,
-            "reason": "Required persistence service unavailable" if unsupported else "Recorded public-entry probe outcome",
-            "commands": [] if unsupported else [{"command": "python3 probe.py", "cwd": root.relative_to(target).as_posix(),
-                          "returncode": 0, "stdout": marker + "\n", "stderr": ""}],
+            "state": "completed", "classification": classification,
+            "reason": "Recorded probe outcome",
+            "commands": [{"command": f"{sys.executable} -B {probe}", "cwd": root.relative_to(target).as_posix(),
+                          "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}],
         })
         attempts.append({"ordinal": ordinal, "classification": classification, "dynamic_evidence": {"reproduction_result": evidence}})
         state.atomic_json(target / output, {"candidate_id": identity,
@@ -107,7 +109,7 @@ def write_accepted_candidate(target: Path, function_id="calc.py::inc", bug_id="c
             "confirmation_status": status, "attempts": attempts,
         })
         accepted = scheduler.transition(target, job["id"], "complete", bug_validation_executor.canonical_finalization_receipt(target, job), None, "execution")
-        if prior_unsupported and ordinal == 1:
+        if prior_inconclusive and ordinal == 1:
             scheduler.transition(target, job["id"], "retry", None, None, "execution")
     plan_path = state.control_dir(target) / "job_plans" / "bug_validation.json"
     entries = state.read_json(plan_path, {}).get("entries", [])

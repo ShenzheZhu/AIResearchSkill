@@ -10,7 +10,7 @@ authority.
 4. `extraction`: when CodeGraph is selected, first run `codegraph.py export --output "$PROJECT/fm_agent_skill/control/codegraph_export.json"`, then run `executor.py extract --project "$PROJECT" --codegraph-export "$PROJECT/fm_agent_skill/control/codegraph_export.json"` (plus every selected `--submodule`). Otherwise omit that option. Extraction uses mapped CodeGraph spans first, Tree-sitter when installed, then the profile-declared language-specific fallback. ArkTS deliberately uses its FM-Agent-compatible `arkts-brace` extractor because CodeGraph does not support `.ets`. It writes immutable function copies and the `fm_agent_skill` control inventory without calling FM-Agent. Never analyze test paths, emit a pseudo-function for declaration-only headers, hash-name artifacts, or write inline `[SPEC]`/`[INFO]` into copied source.
 5. `call_graph`: when CodeGraph is selected, reuse that same export with `executor.py graph --project "$PROJECT" --codegraph-export "$PROJECT/fm_agent_skill/control/codegraph_export.json"`. It maps exported nodes/edges to current extracted artifacts and records `exact` only then. Without CodeGraph, dispatch `fm-agent-skill:fm-agent-static-edge-worker`, validate its `fm_agent/agent_static_edges_candidate.json` through `executor.py record-agent-edges`, then rerun `executor.py graph`; only validated edges are used and the backend remains `agent-static/best-effort`.
 6. `specification`: after knowledge materialization, run `job_planner.py --phase specification` once, then `semantic_executor.py prepare`. It registers domain context plus every function across all phases/layers before execution, using caller-first dependencies and batches of up to eight by default. Dispatch only exact tickets for `fm-agent-skill:fm-domain-context-worker` and `fm-agent-skill:fm-spec-batch-worker`; never generate a Workflow script. Each Worker follows original FM-Agent semantics: derive intended condition B from domain/interface/caller relations before inspecting implementation details. Same-layer batches may run concurrently; each writes native three-field `.spec.json` and native `.info.json` sidecars without changing source copies. The deterministic boundary strips harmless legacy/identity fields, reports every invalid pair in the batch at once, and redispatches only rejected pairs.
-7. `verification`: only after the specification gate succeeds, run `job_planner.py --phase verification` once, then `semantic_executor.py prepare`. Dispatch one exact `fm-agent-skill:fm-verify-function-worker` ticket for every pending function; the executor never substitutes a confidence shortcut. The Worker independently derives actual postcondition A and performs FM-Agent's structured A→B check against the native spec B. Schema 3 records explicit completion, loop obligations and candidate identities; `--all-bugs` continues after independent mismatches, while default mode admits one candidate per function. Mark a direct local violation `MISMATCH` only with a concrete counterexample and exact source quote; mark callers affected only through an invalid callee `DEPENDENCY_RISK`, not `MISMATCH`. Retry malformed output and never treat it as semantic evidence. Do not pass the phase when fewer than half the scope reaches MATCH/MISMATCH or any result is ERROR.
+7. `verification`: only after the specification gate succeeds, run `job_planner.py --phase verification` once, then `semantic_executor.py prepare`. Dispatch exact `fm-agent-skill:fm-verify-function-worker` tickets covering every pending function; the executor never substitutes a confidence shortcut. The existing partitioner groups small functions up to the default eight-function cap while retaining the complexity-token and source-byte limits; large or branch-heavy functions still partition. Each function has its own result and validation. The Worker independently derives actual postcondition A and performs FM-Agent's structured A→B check against the native spec B. Schema 3 records explicit completion, loop obligations and candidate identities; `--all-bugs` continues after independent mismatches, while default mode admits one candidate per function. Mark a direct local violation `MISMATCH` only with a concrete counterexample and exact source quote; mark callers affected only through an invalid callee `DEPENDENCY_RISK`, not `MISMATCH`. Retry malformed output and never treat it as semantic evidence. Do not pass the phase when fewer than half the scope reaches MATCH/MISMATCH or any result is ERROR.
 8. `bug_validation`: run `job_planner.py --phase bug_validation` once after
    verification. It creates one dynamic-validation job for every current direct
    candidate ID; each job carries its candidate and actual function ID; when there are no candidates, it records an empty completed plan.
@@ -19,17 +19,26 @@ authority.
    to host capacity. In default `agent-executed` mode, do not call
    `probe_runner.py detect`: every registered language uses the Worker-selected
    `host-project-toolchain` execution pass. The Worker records a real
-   public-entry probe using only an attempt-local workspace and cache, then its
-   finalization pass consumes that immutable evidence. It selects the project's
+   public-entry probe using only an attempt-local workspace and cache. After
+   validated preparation, the execution ticket may continue the same isolated
+   preparation Worker for identical project/job/candidate/attempt/input hash;
+   otherwise launch fresh. The runtime generates reports and canonical receipts
+   locally from validated immutable execution and accepted history. It selects
+   the project's
    actual command, including Makefile projects; a missing SDK, device, compiler,
    cache, or public entry produces `unsupported/inconclusive` only after the
    Worker records that evidence. In optional `adapter` mode only, the
    Coordinator may run `probe_runner.py detect`, `probe_runner.py run`, and
    `reproduction_runner.py run`; C/C++ CMake adaptation additionally requires
    `CMakeLists.txt`, not merely a `cmake` executable. A build/syntax result
-   cannot confirm a defect. An execution error requeues the same job. Write
-   reports and a current summary only after every Bug Validator job has
-   scheduler-successfully completed.
+   cannot confirm a defect. An execution error requeues the same job within its
+   existing budget; valid unsupported evidence finishes inconclusive after the
+   first attempt. Completed negative probes retain their budget and require a
+   distinct lawful witness or trigger. Candidate reports follow accepted evidence;
+   write the current summary only after every Bug Validator job has
+   scheduler-successfully completed. Verify and Bug preparation receive the copied
+   requirements and permitted caller evidence; an invalid or unclear witness
+   domain remains a named gap, never invented negative output or weakened Q.
 9. `finalize`: write summaries and a successful baseline after every previous
    gate passed. A schema-v3 `MISMATCH` is a static finding only while its
    automatic dynamic-validation job remains incomplete; after the phase

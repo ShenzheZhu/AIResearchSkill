@@ -50,7 +50,7 @@ class EvidenceSealingAndLoopOwnershipTest(unittest.TestCase):
         (target / "calc.py").write_text("def inc(x): return x + 1\n")
         return scheduler.create(target, {"id": "candidate", "phase": "bug_validation", "type": "bug_validate", "required_outputs": ["fm_agent/bug_validation/candidate.result.json"], "artifacts": [], "negative_retries": 1, "input": {"bug_id": "candidate", "function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"), "mode": "full"}})
 
-    def attempt(self, target, job, number, value=1, unsupported=False):
+    def attempt(self, target, job, number, value=1, inconclusive=False):
         job = scheduler.transition(target, job["id"], "start", None, None, "execution")
         root = validator.attempt_dir(target, "candidate", number)
         entry = {"ecosystem": "host-project-toolchain", "kind": "module", "target": "calc.py", "symbol": "inc"}
@@ -59,15 +59,13 @@ class EvidenceSealingAndLoopOwnershipTest(unittest.TestCase):
         probe = root / "probe.py"
         # The contract is x+2 at x=0 and x+1 otherwise; different legal probes
         # therefore give a genuine negative followed by a concrete violation.
-        probe.write_text("import sys\nsys.path.insert(0,sys.argv[1])\nimport calc\n" + f"x={value}\nexpected=x+2 if x==0 else x+1\nprint('CONFIRMED' if calc.inc(x)!=expected else 'NOT CONFIRMED')\n")
-        commands = []
-        classification = "inconclusive"
-        if not unsupported:
-            result = subprocess.run([sys.executable, "-B", str(probe), str(target)], cwd=root, text=True, capture_output=True, check=True)
-            classification = "confirmed" if result.stdout.startswith("CONFIRMED\n") else "not_reproduced"
-            commands = [{"command": f"{sys.executable} -B {probe} {target}", "cwd": root.relative_to(target).as_posix(), "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}]
+        output = "'NO MARKER'" if inconclusive else "'CONFIRMED' if calc.inc(x)!=expected else 'NOT CONFIRMED'"
+        probe.write_text("import sys\nsys.path.insert(0,sys.argv[1])\nimport calc\n" + f"x={value}\nexpected=x+2 if x==0 else x+1\nprint({output})\n")
+        result = subprocess.run([sys.executable, "-B", str(probe), str(target)], cwd=root, text=True, capture_output=True, check=True)
+        classification, _ = validator.output_classification(result.stdout, result.returncode)
+        commands = [{"command": f"{sys.executable} -B {probe} {target}", "cwd": root.relative_to(target).as_posix(), "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}]
         path = root / "reproduction_result.json"
-        state.atomic_json(path, {"schema_version": 2, **identity, "execution_mode": "agent-executed", "language": "python", "public_entrypoint": entry, "commands": commands, "state": "unsupported" if unsupported else "completed", "classification": classification, "reason": "Recorded execution outcome"})
+        state.atomic_json(path, {"schema_version": 2, **identity, "execution_mode": "agent-executed", "language": "python", "public_entrypoint": entry, "commands": commands, "state": "completed", "classification": classification, "reason": "Recorded execution outcome"})
         return job, {"ordinal": number, "classification": classification, "dynamic_evidence": {"reproduction_result": path.relative_to(target).as_posix()}}
 
     def report(self, target, job, attempts, status):
@@ -103,7 +101,7 @@ class EvidenceSealingAndLoopOwnershipTest(unittest.TestCase):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
                 target = Path(temporary).resolve()
                 job = self.prepare(target)
-                job, first = self.attempt(target, job, 1, unsupported=True)
+                job, first = self.attempt(target, job, 1, inconclusive=True)
                 self.report(target, job, [first], "inconclusive")
                 job = scheduler.transition(target, job["id"], "complete", validator.canonical_finalization_receipt(target, job), None, "execution")
                 scheduler.transition(target, job["id"], "retry", None, None, "execution")

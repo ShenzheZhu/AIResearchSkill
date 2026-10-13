@@ -133,20 +133,24 @@ natural-language arguments are not machine-checked proofs.
 Identity and snapshot must match the analyzed run, or the retained-origin
 qualification below must establish unchanged applicability.
 
-Finding/bug result uses `schema_version: 2` and records at least
-`{bug_id, candidate_id, function_id, snapshot_commit,
-confirmation_status, attempts}` plus the specification claim, implementation
-evidence, trigger, probe, and output. `confirmation_status` is `confirmed`,
+Finding/bug result uses `schema_version: 2` and is generated locally from
+validated immutable execution and accepted history. It records
+`{schema_version, bug_id, candidate_id, function_id, snapshot_commit,
+confirmation_status, candidate_reasoning, attempts}`. `candidate_reasoning`
+preserves the assigned static witness; it is not a record of the input actually
+executed. The detail report embeds each execution record separately.
+`confirmation_status` is `confirmed`,
 `rejected`, or `inconclusive`; it is never inferred from a build result. Each
-attempt has `{ordinal, classification, trigger, probe, output,
-dynamic_evidence, timestamp}` where classification is `confirmed`,
+attempt has `{ordinal, classification, dynamic_evidence}` where classification is `confirmed`,
 `not_reproduced`, or `inconclusive` and `dynamic_evidence` is exactly
 `{"reproduction_result":"fm_agent_skill/probes/.../reproduction_result.json"}`.
 The referred result belongs to the same snapshot and its completed
 classification must match. A report can be confirmed only by `CONFIRMED` runtime
 evidence; it can be rejected only by executed `NOT CONFIRMED` evidence after the
-configured negative attempts, preserving every accepted unsupported or
-inconclusive outcome. Semantic attempt ordinals are distinct and ordered;
+configured negative attempts, preserving every accepted outcome. Valid
+unsupported execution finishes inconclusive after its first accepted attempt;
+only completed negative/ambiguous probes continue through their existing budget.
+Semantic attempt ordinals are distinct and ordered;
 runtime failures may leave ordinal gaps but never justify dropping a prior
 accepted outcome. `summary.json` is Coordinator-authored and has
 at least `{snapshot_commit, total_candidates, total_confirmed, total_rejected,
@@ -164,8 +168,10 @@ the execution record has version 2. Both carry exact `bug_id`, `candidate_id`,
 actual `function_id`, attempt and originating snapshot identities. The reproduction contract
 has an approved language adapter, public-entrypoint explanation, fixed markers,
 current snapshot commit, and no shell command. In adapter mode, `reproduction_runner.py` executes a fixed command. In
-agent-executed mode, a fresh Worker records the actual project-scoped command
-sequence. Accepted receipt identity seals the report and each attempt's probe,
+agent-executed mode, an isolated Worker records the actual project-scoped command
+sequence. Only its same-project/job/candidate/attempt/input-hash preparation
+context may continue after validated preparation; otherwise execution starts
+fresh. Accepted receipt identity seals the report and each attempt's probe,
 contract, execution record and available build/profile records in the existing
 SQLite artifact ledger. Accepted negative retry outcomes are sealed before the
 next attempt; changing those bytes invalidates authority.

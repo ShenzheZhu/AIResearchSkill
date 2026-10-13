@@ -36,16 +36,20 @@ Claude Code or Codex subagent facility. The enforced default profile is sixteen
 active workers globally, eight specification batches, twelve verification workers,
 four Bug Validators, and four read-only incremental plan workers. Configure these
 through `max_active_subagents`, `spec_concurrency`, `verify_concurrency`,
-`bug_validation_concurrency`, `bug_validation_finalize_concurrency`, and
-`read_only_plan_concurrency`. The first bounds live candidate probe work; the
-second bounds final report/receipt Workers after their immutable execution
-evidence has been accepted, so finalization cannot starve new candidates.
-`worker_target_tokens` (12000), `worker_max_functions` (3), and
+`bug_validation_concurrency`, and `read_only_plan_concurrency`.
+`bug_validation_concurrency` bounds candidate preparation and execution;
+report/receipt generation runs locally and consumes no Worker slot.
+`worker_target_tokens` (12000), `worker_max_functions` (8), and
 `worker_max_source_bytes` (262144) drive deterministic adaptive spec/verify
-partitioning. `spec_batch_size` is a deprecated explicit compatibility cap.
+partitioning. Small functions may share a job; large or branch-heavy functions
+still partition under the unchanged complexity-token and source-byte limits.
+Each verification function retains its own result and validation. This default
+change has no measured native or wall-clock performance claim.
+`spec_batch_size` is a deprecated explicit compatibility cap.
 `worker_lease_seconds` defaults to 900. `bug_validation_max_attempts` defaults to
 `5` for runtime failures, and `bug_validation_negative_retries` defaults to
-`2` additional completed negative probes. These scheduling and retry
+`2` additional completed negative probes. Valid unsupported execution finishes
+inconclusive after its first attempt without repeating a missing runtime. These scheduling and retry
 limits are operational only and are excluded from the analysis fingerprint.
 
 `worker_prompt_change_policy` defaults to `invalidate`: any Worker document

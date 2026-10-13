@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Added by AIResearchSkill: unavailable attempts cannot become sufficient negative evidence.
+# Added by AIResearchSkill: inconclusive attempts cannot become sufficient negative evidence.
 """Keep unresolved retry schedules visible after the negative-attempt budget ends."""
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import scheduler
 
 
 class MixedValidationOutcomesTest(unittest.TestCase):
-    def test_two_unavailable_attempts_then_one_negative_remain_inconclusive(self) -> None:
+    def test_two_completed_inconclusive_attempts_then_one_negative_remain_inconclusive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary).resolve()
             state.atomic_json(state.skill_dir(target) / "active.json", {
@@ -43,19 +43,18 @@ class MixedValidationOutcomesTest(unittest.TestCase):
                     "expected_marker": "CONFIRMED", "not_confirmed_marker": "NOT CONFIRMED",
                 })
                 probe = root / "probe.py"
-                probe.write_text("import sys\nsys.path.insert(0, sys.argv[1])\nfrom calc import inc\nprint('NOT CONFIRMED' if inc(1) == 2 else 'CONFIRMED')\n")
-                commands = []
-                if ordinal == 3:
-                    result = subprocess.run([sys.executable, "-B", str(probe), str(target)], cwd=root, text=True, capture_output=True, check=True)
-                    commands = [{"command": f"{sys.executable} -B {probe} {target}", "cwd": root.relative_to(target).as_posix(),
-                                 "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}]
-                classification = "not_reproduced" if commands else "inconclusive"
+                probe_output = "NOT CONFIRMED" if ordinal == 3 else "NO MARKER"
+                probe.write_text(f"import sys\nsys.path.insert(0, sys.argv[1])\nfrom calc import inc\nassert inc(1) == 2\nprint({probe_output!r})\n")
+                result = subprocess.run([sys.executable, "-B", str(probe), str(target)], cwd=root, text=True, capture_output=True, check=True)
+                commands = [{"command": f"{sys.executable} -B {probe} {target}", "cwd": root.relative_to(target).as_posix(),
+                             "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}]
+                classification = "not_reproduced" if ordinal == 3 else "inconclusive"
                 evidence = (root / "reproduction_result.json").relative_to(target).as_posix()
                 state.atomic_json(target / evidence, {"function_id": "calc.py::inc", "candidate_id": state.candidate_id("calc.py::inc"),
                     "schema_version": 2, "execution_mode": "agent-executed", "bug_id": "mixed", "attempt": ordinal,
                     "snapshot_commit": "unversioned", "language": "python", "public_entrypoint": entry,
-                    "state": "completed" if commands else "unsupported", "classification": classification,
-                    "commands": commands, "reason": "Public probe ran" if commands else "Required service unavailable",
+                    "state": "completed", "classification": classification,
+                    "commands": commands, "reason": "Public probe ran",
                 })
                 attempts.append({"ordinal": ordinal, "classification": classification, "dynamic_evidence": {"reproduction_result": evidence}})
                 report = {"candidate_id": state.candidate_id("calc.py::inc"), "schema_version": 2, "bug_id": "mixed", "function_id": "calc.py::inc", "snapshot_commit": "unversioned",
