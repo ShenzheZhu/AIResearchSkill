@@ -161,7 +161,7 @@ def fingerprint(project: Path, one_phase: bool, submodules: list[str], extra_edg
 
 def source_files(project: Path, submodules: list[str] | None = None) -> list[Path]:
     hard_ignored = {".git", "fm_agent", "fm_agent_skill", "fm_agent_plugin", ".codegraph"}
-    ignored = hard_ignored | {".venv", "node_modules", "oh_modules", "build", "dist", "out", "target", "CMakeFiles"}
+    ignored = hard_ignored | {".venv", "node_modules", "oh_modules", "vendor", "build", "dist", "out", "target", "CMakeFiles"}
     found = []
     for scope in submodules or [""]:
         start = project / scope

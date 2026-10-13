@@ -68,7 +68,7 @@ class ExtractionNamedCallablesTest(unittest.TestCase):
         self.assertEqual(out["function_count"], 1)
         self.assertEqual(out["index"]["functions"][0]["id"], "api.go::IsValid")
 
-    def test_unicode_names_are_retained_and_anonymous_defaults_fail(self):
+    def test_unicode_names_are_retained_and_anonymous_defaults_have_positions(self):
         for suffix, source, name_text in ((".js", "export function 流程(value) { return value + 1; }", "流程"), (".js", "export function $流程(value) { return value + 1; }", "$流程"), (".go", "func ΔCount(value int) int { return value + 1 }", "ΔCount")):
             with self.subTest(suffix=suffix):
                 start = source.encode().index(name_text.encode())
@@ -77,9 +77,11 @@ class ExtractionNamedCallablesTest(unittest.TestCase):
                 out = self.extract(suffix, source, Node("program", 0, len(source.encode()), [declaration]))
                 self.assertEqual(out["index"]["functions"][0]["id"], "api" + suffix + "::" + name_text)
         source = "export default function(value) { return value + 1; }"
-        declaration = Node("function_declaration", source.index("function"), len(source))
-        with self.assertRaisesRegex(ValueError, "Unsupported callable declaration without a name"):
-            self.extract(".js", source, Node("program", 0, len(source), [declaration]))
+        for suffix in (".js", ".ts", ".tsx"):
+            with self.subTest(suffix=suffix):
+                declaration = Node("function_declaration", source.index("function"), len(source))
+                out = self.extract(suffix, source, Node("program", 0, len(source), [declaration]))
+                self.assertEqual(out["index"]["functions"][0]["id"], "api" + suffix + "::function_declaration@1:16")
 
     def test_python_named_lambdas_use_tree_and_native_ast(self):
         source = "check = lambda value: value > 0"
@@ -108,7 +110,7 @@ class ExtractionNamedCallablesTest(unittest.TestCase):
                 out = self.extract(suffix, source, Node("translation_unit", 0, len(source), [declaration]))
                 self.assertEqual(out["index"]["functions"][0]["id"], "api" + suffix + "::count")
 
-    def test_top_level_callbacks_fail_but_nested_callbacks_remain_covered(self):
+    def test_javascript_top_level_callbacks_extract_and_nested_callbacks_remain_covered(self):
         for suffix, kind, source in ((".js", "arrow_function", "function run() { use(value => value + 1); }"), (".go", "func_literal", "func Run() { Use(func() {}) }")):
             with self.subTest(suffix=suffix):
                 top_source = "function run() { return 1; } use(value => value + 1);" if suffix == ".js" else "package api; func Run() int { return 1 }; var result = Use(func() {})"
@@ -120,8 +122,13 @@ class ExtractionNamedCallablesTest(unittest.TestCase):
                 declaration_end = top_source.index("}") + 1
                 declaration = Node("function_declaration", top_source.index("function" if suffix == ".js" else "func Run"), declaration_end, [name], {"name": name})
                 top_level = Node("call_expression", callback_start - 4, len(top_source), [callback])
-                with self.assertRaisesRegex(ValueError, "Unsupported unbound callable"):
-                    self.extract(suffix, top_source, Node("program", 0, len(top_source), [declaration, top_level]))
+                if suffix == ".js":
+                    out = self.extract(suffix, top_source, Node("program", 0, len(top_source), [declaration, top_level]))
+                    self.assertEqual(out["function_count"], 2)
+                    self.assertIn(f"api.js::arrow_function@1:{callback_start + 1}", {item["id"] for item in out["index"]["functions"]})
+                else:
+                    with self.assertRaisesRegex(ValueError, "Unsupported unbound callable"):
+                        self.extract(suffix, top_source, Node("program", 0, len(top_source), [declaration, top_level]))
                 callback_start = source.index("value =>") if suffix == ".js" else source.index("func()")
                 callback = Node(kind, callback_start, len(source) - 3)
                 start = source.index(name_text)

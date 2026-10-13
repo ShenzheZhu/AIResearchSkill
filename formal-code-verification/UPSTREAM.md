@@ -27,6 +27,8 @@ Packaging changes and local fixes:
 - Resolve temporary fixture roots so default macOS Python commands work without a `TMPDIR` workaround.
 - Stop a failed DAG once independent ready/live work has drained. Do not wait for a completion event when no Worker can produce one.
 - Reject source parsing failures, clear stale re-extraction inventories, use the TSX grammar for TSX, and preserve ordinary named function-expression/literal bindings. Unsupported callable shapes remain explicit gaps.
+- Extract unbound JavaScript/TypeScript/TSX anonymous callbacks, IIFEs and anonymous declarations with readable Tree-sitter source-position identities; preserve inner named callback expressions and original manifest paths, line spans and source slices. Retain explicit rejection of ambiguous Go bindings, destructured callable bindings and unsupported Python shapes.
+- Treat vendored dependency directories as advisory inventory exclusions; explicit `vendor` selection still includes their actual source, including when nested in a selected production `dist` directory.
 - Classify only the final probe command using its exact first-line marker. Setup/verifier success messages are not candidate reproduction; any command failure still prevents confirmation.
 - Retain unsupported/inconclusive retry outcomes, include dynamic gaps in the audit status, and bind qualified native coverage to its assigned function, exact specification, accepted receipt and recorded attempt. Native evidence cannot acquire an integration or machine-proof label.
 
